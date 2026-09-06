@@ -200,6 +200,11 @@ Injection arrives as both `A02:2025` and `A03:2025`, Security Misconfiguration
 as `A05:2025` and `A05:2021` — so labels are normalised to one taxonomy on the
 way out, with the original kept in `meta.owaspUpstream`.
 
+New to these lists, or want a plain-language description of each category, who
+publishes them, and a link to the source? See [docs/OWASP.md](docs/OWASP.md).
+The two tables below are about what `cleartoship` detects, not what the
+categories mean.
+
 ## OWASP Top 10:2025 coverage — honest version
 
 ClearToShip is not an even, "100% coverage" scanner and does not claim to be —
