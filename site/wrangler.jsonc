@@ -1,13 +1,32 @@
 {
   "$schema": "./node_modules/wrangler/config-schema.json",
   "name": "cleartoship",
+  "main": "src/index.ts",
   "compatibility_date": "2026-08-20",
-  // Static landing page: no Worker script, just assets served from the edge.
+  // Explicit even though default-on at this compatibility_date — resilient to
+  // future default changes. Needed for node:crypto (Ed25519 JWK import) in the
+  // license-signing code path.
+  "compatibility_flags": ["nodejs_compat"],
   "assets": {
     "directory": "./public",
-    "not_found_handling": "404-page"
-  }
+    "not_found_handling": "404-page",
+    // Only these two path prefixes ever reach the Worker script below — all
+    // normal landing-page traffic is served as static assets and never
+    // invokes src/index.ts at all.
+    "run_worker_first": ["/webhooks/*", "/license/*"]
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "cleartoship-licenses",
+      "database_id": "1b3f5328-b17e-4589-919d-ed34d493500f",
+      "migrations_dir": "migrations"
+    }
+  ]
   // The custom domain (cleartoship.app / www) is bound once in the Cloudflare
   // dashboard, not here. Keeping it out of config means every automated build
   // deploys cleanly instead of re-attempting the domain binding on each push.
+  //
+  // Secrets (never in this file, set via `wrangler secret put <name>`):
+  //   STRIPE_SECRET_KEY, STRIPE_WEBHOOK_SECRET, LICENSE_SIGNING_PRIVATE_KEY_JWK
 }

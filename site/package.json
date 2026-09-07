@@ -5,9 +5,16 @@
   "description": "cleartoship.app landing page — static assets served by a Cloudflare Worker",
   "scripts": {
     "deploy": "wrangler deploy",
-    "dev": "wrangler dev"
+    "dev": "wrangler dev",
+    "types": "wrangler types",
+    "check": "tsc --noEmit -p tsconfig.json"
+  },
+  "dependencies": {
+    "stripe": "^22.6.1"
   },
   "devDependencies": {
+    "@cloudflare/workers-types": "^5.20260907.1",
+    "typescript": "^7.0.2",
     "wrangler": "^4.127.0"
   }
 }
