@@ -31,6 +31,15 @@ const result = await build({
   format: 'esm',
   target: 'node22.18',
   outfile: join(out, 'bin/cleartoship.mjs'),
+  // `cleartoship-rules-pro` is loaded via a runtime `import()` whose specifier
+  // is a variable (src/scanners/optional.ts, src/cli.ts's `dispatchPro`), not
+  // a literal — esbuild only tries to statically resolve/inline a literal
+  // specifier, so this is belt-and-suspenders rather than the only thing
+  // keeping the pro package out of this "zero dependency" artifact. Also
+  // means the standalone bundle has no node_modules to resolve it from even
+  // if a user placed the package alongside it — pro rules only ever load via
+  // the npm-package or GitHub Action install paths.
+  external: ['cleartoship-rules-pro'],
   // No `banner` with a shebang here: esbuild preserves the one already at the
   // top of src/cli.ts, and a second on line 2 is a syntax error, not a comment.
   legalComments: 'inline',

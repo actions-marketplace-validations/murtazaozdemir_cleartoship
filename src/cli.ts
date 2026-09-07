@@ -67,6 +67,43 @@ export function resolveRoot(
 
 const program = new Command();
 
+/**
+ * `cleartoship-rules-pro` is never a dependency of this package — the only
+ * coupling is this string literal, dynamically imported, so `npm install
+ * cleartoship` never pulls in the pro package uninvited and this file never
+ * needs to know anything about licenses or how activation works.
+ */
+async function dispatchPro(sub: 'login' | 'status' | 'logout', args: string[]): Promise<void> {
+  let mod: { runProCommand?: (sub: string, args: string[]) => Promise<void> };
+  try {
+    const spec = 'cleartoship-rules-pro/cli';
+    mod = (await import(spec)) as typeof mod;
+  } catch {
+    process.stderr.write(
+      pc.red(
+        'cleartoship-rules-pro is not installed. Run `npm install cleartoship-rules-pro` ' +
+          'to activate the RLS, Server Actions and LLM/agent suites.\n',
+      ),
+    );
+    process.exitCode = 1;
+    return;
+  }
+  if (typeof mod.runProCommand !== 'function') {
+    process.stderr.write(pc.red('cleartoship-rules-pro is installed but its CLI entry point looks broken.\n'));
+    process.exitCode = 1;
+    return;
+  }
+  await mod.runProCommand(sub, args);
+}
+
+const pro = program.command('pro').description('Manage a ClearToShip Pro license');
+pro
+  .command('login')
+  .argument('[key]', 'omit to read $CLEARTOSHIP_LICENSE_KEY or be prompted')
+  .action(async (key?: string) => dispatchPro('login', key ? [key] : []));
+pro.command('status').action(async () => dispatchPro('status', []));
+pro.command('logout').action(async () => dispatchPro('logout', []));
+
 program
   .name('cleartoship')
   .description(

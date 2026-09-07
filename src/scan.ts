@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import { walk } from './utils/files.js';
 import { detectFramework } from './utils/detect.js';
 import { SCANNERS, communityScanner } from './scanners/index.js';
+import { loadOptionalScanners } from './scanners/optional.js';
 import { GUARDVIBE_CVE_RULE_IDS } from './vendor/guardvibe/index.js';
 import { SEVERITY_ORDER } from './types.js';
 import { normaliseOwasp, llmCategory } from './utils/owasp.js';
@@ -81,15 +82,21 @@ export async function scan(options: ScanOptions): Promise<FullScan> {
   const active = SCANNERS.filter(
     (s) => s.applies(ctx) && !(options.noCommunity && s === communityScanner),
   );
+  // A licensed `cleartoship-rules-pro` install adds the RLS, Server Actions and
+  // LLM/agent scanners here; an unlicensed or absent install adds nothing, and
+  // this call never throws either way.
+  const optional = await loadOptionalScanners({ offline: options.offline });
+  const activeAll = [...active, ...optional];
+
   const findings: Finding[] = [];
   const checks: CheckSummary[] = [];
   const warnings: string[] = missingRoots.map(
     (r) => `${r} does not exist; nothing there was scanned.`,
   );
 
-  for (let i = 0; i < active.length; i++) {
-    const scanner = active[i]!;
-    options.onProgress?.(i + 1, active.length, scanner.name);
+  for (let i = 0; i < activeAll.length; i++) {
+    const scanner = activeAll[i]!;
+    options.onProgress?.(i + 1, activeAll.length, scanner.name);
     try {
       const result = await scanner.run(ctx);
       findings.push(...result.findings);

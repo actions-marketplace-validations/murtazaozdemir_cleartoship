@@ -24,66 +24,26 @@ buildFixtures();
 
 const ids = (result) => new Set(result.findings.map((f) => f.id));
 
-test('vulnerable fixture: reports every rule it is built to trigger', async () => {
+test('vulnerable fixture: reports every free-tier rule it is built to trigger', async () => {
+  // CTS001-004, 010-019, 041-046, 050-052 (Server Actions & RLS) and 080-085
+  // (LLM/agent) moved to the licensed cleartoship-rules-pro package — see
+  // packages/rules-pro/test/{rls,server-actions,agent-logic}.test.js for their
+  // coverage, both licensed and (absent) unlicensed. CTS040 and CTS045 stay
+  // here: despite the numbering, they are implemented in the free secrets
+  // scanner, not the Server Actions scanner.
   const result = await scan({ root: VULNERABLE, offline: true });
   const found = ids(result);
   for (const expected of [
-    'CTS001', // missing Server Action / Route Handler auth
-    'CTS002', // no runtime input validation
-    'CTS003', // service-role key inside an action
-    'CTS004', // authenticated but not owner-scoped
-    'CTS010', // public table, RLS off
-    'CTS012', // always-true write policy
-    'CTS013', // sensitive columns readable by anon
-    'CTS014', // owner column with no auth.uid() policy
-    'CTS015', // SECURITY DEFINER without search_path
-    'CTS016', // definer-rights view in public
-    'CTS017', // write grant to anon
-    'CTS018', // policy trusts user_metadata
-    'CTS019', // auth.users republished through a public view
     'CTS028', // install hook runs network/shell code
     'CTS030', // hardcoded secret
     'CTS031', // secret behind NEXT_PUBLIC_
     'CTS032', // .env not gitignored
     'CTS033', // client component reads a server secret
     'CTS040', // client component reads a server env var
-    'CTS041', // getSession() used as a server-side auth check
-    'CTS042', // webhook without signature verification
-    'CTS043', // request body spread into a write
-    'CTS044', // schema opts out of validating
     'CTS045', // AI client allowed to run in the browser
-    'CTS046', // cron endpoint callable by anyone
-    'CTS050', // overlapping permissive policies
-    'CTS051', // storage policy allows listing every object
-    'CTS052', // SECURITY DEFINER function callable by anon
-    'CTS080', // caller text concatenated into a prompt (LLM01)
-    'CTS081', // model call with no token ceiling (LLM06)
-    'CTS082', // system prompt shipped to the browser (LLM08)
-    'CTS083', // agent tool takes an irreversible action, ungated (LLM03)
-    'CTS084', // model output reaching a sink that runs it (LLM10)
-    'CTS085', // a security decision made from the model's answer (LLM07)
   ]) {
     assert.ok(found.has(expected), `expected ${expected} to be reported`);
   }
-});
-
-test('vulnerable fixture: locations point at the offending line', async () => {
-  const result = await scan({ root: VULNERABLE, offline: true });
-  const byId = (id) => result.findings.find((f) => f.id === id);
-
-  assert.equal(byId('CTS010').line, 16, 'CTS010 should point at the CREATE TABLE, not the closing paren');
-  assert.equal(byId('CTS017').line, 50);
-  const definerView = result.findings.find((f) => f.id === 'CTS016' && f.severity === 'medium');
-  assert.equal(definerView.line, 47, 'the SECURITY DEFINER view is at line 47');
-  const matview = result.findings.find((f) => f.id === 'CTS016' && f.severity === 'high');
-  assert.equal(matview.line, 55, 'the materialized view is at line 55');
-  assert.equal(byId('CTS001').file, 'app/actions/admin.ts');
-});
-
-test('vulnerable fixture: the correctly written action is not flagged', async () => {
-  const result = await scan({ root: VULNERABLE, offline: true });
-  const safe = result.findings.filter((f) => f.file === 'app/actions/safe.ts');
-  assert.deepEqual(safe, [], `safe.ts should be clean, got ${safe.map((f) => f.id).join(', ')}`);
 });
 
 test('vulnerable fixture: secrets are redacted in the reported snippet', async () => {
@@ -101,30 +61,6 @@ test('clean fixture: no findings at all', async () => {
     [],
   );
   assert.ok(result.checks.every((c) => c.passed));
-});
-
-test('auth resolved in an imported helper counts as auth', async () => {
-  const result = await scan({ root: INDIRECT, offline: true });
-  const action = result.findings.filter((f) => f.file === 'app/actions/team.ts');
-  assert.deepEqual(
-    action.map((f) => f.id),
-    [],
-    `renameTeam authenticates via requireUser() from @/lib/auth, got ${action
-      .map((f) => `${f.id}@${f.line}`)
-      .join(', ')}`,
-  );
-});
-
-test('a shared-secret cron endpoint is authenticated, and its health check is not a finding', async () => {
-  const result = await scan({ root: INDIRECT, offline: true });
-  const route = result.findings.filter((f) => f.file === 'app/api/cron/digest/route.ts');
-  assert.deepEqual(
-    route.filter((f) => f.id === 'CTS001' || f.id === 'CTS046').map((f) => `${f.id}@${f.line}`),
-    [],
-    'the POST compares Authorization against CRON_SECRET; the GET returns a constant',
-  );
-  // Nor is a route that never reads a body reported for not validating one.
-  assert.equal(route.filter((f) => f.id === 'CTS002').length, 0);
 });
 
 test('lockfile entries are judged as lockfile entries', async () => {
@@ -221,30 +157,6 @@ test('path classification reads directories, not filenames', () => {
   assert.equal(pathClass('migrations/001_init.sql'), 'production');
 });
 
-test('mass assignment is the payload arriving whole, not any write of caller input', async () => {
-  const bad = await scan({ root: VULNERABLE, offline: true });
-  const flagged = bad.findings.filter((f) => f.file === 'app/actions/mass-assign.ts');
-
-  // `.update(body)` — the payload passed straight in.
-  assert.ok(
-    flagged.some((f) => f.id === 'CTS002' && f.line === 10),
-    'a payload written whole is CTS002',
-  );
-  // `{ where: {...}, data: { ...input } }` — the same bug one level down, where
-  // a top-level scan of the call arguments never looked.
-  assert.ok(
-    flagged.some((f) => f.id === 'CTS043' && f.line === 18),
-    'a nested spread of the payload is CTS043',
-  );
-
-  const clean = await scan({ root: CLEAN, offline: true });
-  assert.deepEqual(
-    clean.findings.map((f) => `${f.id} ${f.file}:${f.line}`),
-    [],
-    'reading named fields into an explicit column list is the safe pattern, spread or not',
-  );
-});
-
 test('rules naming a platform the project does not use are not run', async () => {
   // The fixture has no Supabase or Firebase dependency. "Supabase Auth Missing
   // Middleware" was being reported against a real app with neither.
@@ -264,25 +176,6 @@ test('rules naming a platform the project does not use are not run', async () =>
   assert.equal(/Supabase rules/.test(cleanNote), false, 'not skipped where it applies');
 });
 
-test('the LLM rules fire on the shape they name, and not on the safe one', async () => {
-  const bad = await scan({ root: VULNERABLE, offline: true });
-  const byId = (id) => bad.findings.find((f) => f.id === id);
-
-  // Caller text interpolated into the system message.
-  assert.equal(byId('CTS080').meta.llm, 'LLM01:2026 - Prompt Injection');
-  assert.equal(byId('CTS080').file, 'app/ai/assistant.ts');
-  // No max_tokens on a request-reachable model call.
-  assert.equal(byId('CTS081').meta.llm, 'LLM06:2026 - Unbounded Consumption');
-  // A system prompt in a 'use client' module.
-  assert.equal(byId('CTS082').meta.llm, 'LLM08:2026 - Hidden Context Exposure');
-  assert.equal(byId('CTS082').file, 'app/ai/panel.tsx');
-
-  // The clean fixture calls the same API with the caller's text as a separate
-  // user message and a ceiling on the answer. Nothing to report.
-  const clean = await scan({ root: CLEAN, offline: true });
-  assert.deepEqual(clean.findings.map((f) => `${f.id} ${f.file}`), []);
-});
-
 test('scanning a repo by absolute path reports paths relative to that repo', () => {
   // Found by scanning somebody else's repository rather than my own: `root` was
   // always the shell's cwd, so `cleartoship /path/to/their/repo` reported every
@@ -297,7 +190,9 @@ test('scanning a repo by absolute path reports paths relative to that repo', () 
   const escaping = files.filter((f) => f.startsWith('..'));
   assert.deepEqual(escaping, [], 'no finding may be reported with a path that climbs out of the repo');
   assert.ok(
-    files.some((f) => f === 'app/actions/admin.ts'),
+    // admin.ts's finding (a service-role key inside a Server Action) is a
+    // Pro-only rule; logging.ts's CTS070 (free) is the reliable proxy here.
+    files.some((f) => f === 'app/actions/logging.ts'),
     `expected a repo-relative path, got ${files.slice(0, 3).join(', ')}`,
   );
 });
@@ -315,56 +210,6 @@ test('a subdirectory argument still scans as part of the surrounding project', (
     files.every((f) => f.startsWith('app/')),
     'paths stay relative to the project root, not the subdirectory',
   );
-});
-
-test('the agent rules fire on the shape they name, and stand down on the gated one', async () => {
-  const bad = await scan({ root: VULNERABLE, offline: true });
-  const only = (id) => bad.findings.filter((f) => f.id === id);
-
-  // LLM03 — an irreversible tool body the model reaches on its own. Both
-  // spellings: the object literal, and MCP's separate handler argument.
-  const agency = only('CTS083');
-  assert.deepEqual(agency.map((f) => f.meta.tool).sort(), ['purgeWorkspace', 'run_maintenance']);
-  assert.ok(agency.every((f) => f.meta.llm === 'LLM03:2026 - Excessive Agency'));
-  // The same delete behind a confirmation is not excessive agency, and a
-  // read-only tool never was.
-  assert.ok(!agency.some((f) => f.meta.tool === 'archiveWorkspace'), 'a gated tool is not reported');
-  assert.ok(!agency.some((f) => f.meta.tool === 'listWorkspaces'), 'a read-only tool is not reported');
-  // An in-memory Map/Set is not a database. Real-world regression: `client` in
-  // the root list matched `clients.delete(id)` on a Set in the MCP reference
-  // servers, because the pattern allowed a prefix rather than a whole segment.
-  assert.ok(
-    !agency.some((f) => f.meta.tool === 'forgetSession'),
-    'Map.delete() inside a tool is not an irreversible database write',
-  );
-
-  // LLM10 — the point where the answer stops being text.
-  const output = only('CTS084');
-  assert.deepEqual(output.map((f) => f.meta.sink).sort(), [
-    'dangerouslySetInnerHTML',
-    'execSync',
-    'new Function',
-  ]);
-  assert.equal(
-    output.filter((f) => f.severity === 'critical').length,
-    2,
-    'the eval-class sinks are critical; rendering as HTML is high',
-  );
-  assert.ok(output.every((f) => f.meta.llm === 'LLM10:2026 - Improper Output Handling'));
-
-  // LLM07 — the answer is believed. Both shapes: the branch that turns on it,
-  // and the check that hands the verdict straight back.
-  const decision = only('CTS085');
-  assert.equal(decision.length, 2);
-  assert.ok(decision.every((f) => f.meta.llm === 'LLM07:2026 - Misinformation'));
-  assert.ok(decision.every((f) => f.file === 'lib/agent/triage.ts'));
-  // Branching on the *length* of an answer decides nothing about access.
-  assert.ok(!decision.some((f) => f.line > 30), 'summarise() must not be flagged');
-
-  // The clean fixture writes all three correctly — a gated tool, an answer
-  // rendered as text, an access check made against the database — and is silent.
-  const clean = await scan({ root: CLEAN, offline: true });
-  assert.deepEqual(clean.findings.map((f) => `${f.id} ${f.file}`), []);
 });
 
 test('findings carry one OWASP taxonomy, plus an LLM category where it applies', async () => {
@@ -504,12 +349,13 @@ test('a nested .gitignore overrides the one above it', () => {
 
 test('scan honours --ignore, --only and --min-severity equivalents', async () => {
   const all = await scan({ root: VULNERABLE, offline: true });
-  const ignored = await scan({ root: VULNERABLE, offline: true, ignore: ['CTS001'] });
+  const ignored = await scan({ root: VULNERABLE, offline: true, ignore: ['CTS030'] });
   assert.ok(all.findings.length > ignored.findings.length);
-  assert.ok(!ids(ignored).has('CTS001'));
+  assert.ok(!ids(ignored).has('CTS030'));
 
-  const only = await scan({ root: VULNERABLE, offline: true, only: ['CTS010'] });
-  assert.deepEqual([...ids(only)], ['CTS010']);
+  const only = await scan({ root: VULNERABLE, offline: true, only: ['CTS030'] });
+  assert.ok([...ids(only)].every((id) => id === 'CTS030'));
+  assert.ok(ids(only).has('CTS030'));
 
   const criticals = await scan({ root: VULNERABLE, offline: true, minSeverity: 'critical' });
   assert.ok(criticals.findings.every((f) => f.severity === 'critical'));
@@ -597,21 +443,10 @@ test('CLI emits valid JSON, SARIF, a fix prompt and a badge', () => {
 
   const prompt = runCli(['-C', VULNERABLE, '--offline', '--fix-prompt']).stdout;
   assert.match(prompt, /# ClearToShip — security fixes to apply/);
-  assert.match(prompt, /CTS001/);
+  assert.match(prompt, /CTS030/);
 
   const badge = runCli(['-C', CLEAN, '--offline', '--badge']).stdout;
   assert.match(badge, /img\.shields\.io.*10b981/);
-});
-
-test('getSession() does not satisfy the auth check, and replaces CTS001 there', async () => {
-  const result = await scan({ root: VULNERABLE, offline: true });
-  const settings = result.findings.filter((f) => f.file === 'app/actions/settings.ts');
-  const found = new Set(settings.map((f) => f.id));
-  assert.ok(found.has('CTS041'), 'supabase.auth.getSession() must be reported');
-  assert.ok(
-    !found.has('CTS001'),
-    'CTS041 is the precise diagnosis; the generic missing-auth rule should not double-report',
-  );
 });
 
 test('hardcoded keys are not swallowed by placeholder heuristics', async () => {
@@ -691,7 +526,14 @@ test('vendored rules add coverage without duplicating our own', async () => {
     assert.match(f.meta.attribution, /Apache-2\.0/);
   }
 
-  // A superseded rule must never appear beside the rule that replaced it.
+  // A superseded rule must never appear beside the rule that replaced it —
+  // including VG401/VG402/VG427/VG952/VG1007, superseded by the Server
+  // Actions suite. That suite now lives in the licensed cleartoship-rules-pro
+  // package, so an unlicensed scan has zero coverage for it either way: an
+  // earlier attempt to stand these vendored ids back up as free-tier fallback
+  // coverage was reverted after VG1010 reported "critical" on clean-app's
+  // deliberately-safe updateProfile action (see community.ts's SUPERSEDED
+  // doc comment) — a false positive is worse than a silent gap here.
   const ids = new Set(community.map((f) => f.id));
   for (const superseded of ['VG400', 'VG401', 'VG402', 'VG427', 'VG952', 'VG1007']) {
     assert.ok(!ids.has(superseded), `${superseded} is superseded and must not fire`);
@@ -822,7 +664,7 @@ test('markdown report is well-formed for both verdicts', async () => {
   const vuln = renderMarkdown(await scan({ root: VULNERABLE, offline: true }));
   assert.match(vuln, /## 🔴 ClearToShip — hold before shipping/);
   assert.match(vuln, /\| Severity \| Rule \| Finding \| Location \|/);
-  assert.match(vuln, /`CTS001`/);
+  assert.match(vuln, /`CTS030`/);
   assert.match(vuln, /<details><summary>/, 'lower-severity findings should be collapsible');
   // A GitHub comment must not exceed 65536 bytes.
   assert.ok(Buffer.byteLength(vuln) < 65536, 'comment body must fit GitHub limit');
@@ -933,19 +775,6 @@ test('generated code (Prisma client, *.generated.*) is skipped', async () => {
   assert.deepEqual(inGenerated, [], 'vendor/generated code must not produce findings');
 });
 
-test('webhook that verifies via a framework helper or sig header is not flagged', async () => {
-  const result = await scan({ root: VULNERABLE, offline: true });
-  const cts042 = result.findings.filter((f) => f.id === 'CTS042').map((f) => f.file);
-  assert.ok(
-    cts042.includes('app/api/webhooks/stripe/route.ts'),
-    'the unverified webhook must still be flagged',
-  );
-  assert.ok(
-    !cts042.some((f) => f.includes('stripe-verified')),
-    'a webhook that reads the signature header + verifies must not be flagged',
-  );
-});
-
 test('A09/A10/A08 logic rules fire precisely and skip the safe cases', async () => {
   const result = await scan({ root: VULNERABLE, offline: true });
   const ids = (id) => result.findings.filter((f) => f.id === id);
@@ -1000,11 +829,17 @@ async function tempProject(files) {
 
 const VULNERABLE_ROUTE = [
   "import { createClient } from '@supabase/supabase-js';",
+  // A hardcoded secret (CTS030, free/secrets scanner) rather than the missing
+  // auth check itself (CTS001, now licensed cleartoship-rules-pro) — this
+  // fixture is a proxy for "was this file/directory actually opened", not a
+  // test of the Server Actions suite, so it only needs a finding a default,
+  // unlicensed scan will actually produce.
+  "const STRIPE_KEY = 'sk_live_51NqAbCdEfGhIjKlMnOpQrStU';",
   'export async function POST(req: Request) {',
   '  const body = await req.json();',
   '  const db = createClient(process.env.URL!, process.env.SUPABASE_SERVICE_ROLE_KEY!);',
   "  await db.from('users').delete().eq('id', body.id);",
-  '  return Response.json({ ok: true });',
+  '  return Response.json({ ok: true, key: STRIPE_KEY });',
   '}',
   '',
 ].join('\n');
@@ -1018,9 +853,7 @@ test('a directory named site/ is read, not skipped', async () => {
     'site/app/api/admin/route.ts': VULNERABLE_ROUTE,
   });
   const result = await scan({ root, offline: true, noCommunity: true });
-  const found = ids(result);
-  assert.ok(found.has('CTS001'), 'missing auth under site/ must still be reported');
-  assert.ok(found.has('CTS003'), 'service-role key under site/ must still be reported');
+  assert.ok(ids(result).has('CTS030'), 'a hardcoded secret under site/ must still be reported');
 });
 
 test('naming a single file scans that file', async () => {
@@ -1038,7 +871,7 @@ test('naming a single file scans that file', async () => {
     noCommunity: true,
   });
   assert.equal(result.fileCount, 1, 'the named file is the one file scanned');
-  assert.ok(ids(result).has('CTS001'));
+  assert.ok(ids(result).has('CTS030'));
 });
 
 test('a path that does not exist is reported, not silently empty', async () => {

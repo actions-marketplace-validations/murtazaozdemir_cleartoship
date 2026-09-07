@@ -21,6 +21,9 @@
   ],
   "license": "MIT",
   "type": "module",
+  "workspaces": [
+    "packages/*"
+  ],
   "bin": {
     "cleartoship": "dist/cli.js"
   },
@@ -30,6 +33,10 @@
     ".": {
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js"
+    },
+    "./internal": {
+      "types": "./dist/internal.d.ts",
+      "import": "./dist/internal.js"
     }
   },
   "files": [
@@ -47,9 +54,11 @@
   },
   "scripts": {
     "build": "tsc -p tsconfig.json && chmod +x dist/cli.js",
+    "build:pro": "npm run build --workspace=packages/rules-pro",
     "bundle": "node scripts/bundle.mjs",
     "dev": "tsc -p tsconfig.json --watch",
     "test": "node --test test/*.test.js",
+    "test:pro": "npm run test --workspace=packages/rules-pro",
     "prepare": "npm run build"
   },
   "dependencies": {
