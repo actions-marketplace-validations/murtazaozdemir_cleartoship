@@ -156,6 +156,22 @@ and none of this can go live before the npm-republish blocker two paragraphs
 up is fixed — a licensed pro package plugging into a free package nobody can
 `npx install` doesn't do anything.
 
+**Price: $5/month, decided 2026-09-07.** One tier, no seats, no usage limits.
+`site/public/pricing.html` (linked from nav/footer on `/` and `/help`) has the
+Free-vs-Pro comparison and an honest "billing is manual right now" callout —
+but its "Get Pro" button still points at a placeholder
+(`#pricing-paypal-not-yet-configured`, marked with a `PAYPAL-LINK-PLACEHOLDER`
+comment in the HTML). **Do not `wrangler deploy` the site until that's swapped
+for a real PayPal.me link or subscription button** — three options were on the
+table (real PayPal subscription button, plain paypal.me link paid manually
+each month, or ship the page now with a placeholder); the placeholder was
+chosen so the page's design could be reviewed before committing to either
+mechanism. Also still needed once a real link exists: the
+`/admin/license/issue` endpoint (bearer-token-gated, mirrors the Stripe
+webhook's `upsertLicense`/`signLicenseToken` calls) that actually turns a
+payment notification into a delivered key — designed in conversation, not yet
+built.
+
 No price has been set. Still no tiers beyond the one Pro bundle.
 
 ## Contributing

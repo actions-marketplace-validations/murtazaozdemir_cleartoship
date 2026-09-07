@@ -1,0 +1,296 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="theme-color" content="#0a0d12">
+<title>Pricing — ClearToShip</title>
+<meta name="description" content="ClearToShip is free forever for dependency, secrets and error-handling checks. Pro is $5/month for the Row Level Security, Server Actions and LLM/agent rule suites.">
+<meta property="og:title" content="ClearToShip — Pricing">
+<meta property="og:description" content="Free forever, or $5/month for the RLS, Server Actions and LLM/agent checks.">
+<meta property="og:type" content="website">
+<meta property="og:url" content="https://cleartoship.app/pricing">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🛡️</text></svg>">
+<style>
+  :root {
+    --bg: #0a0d12;
+    --bg-soft: #10151c;
+    --panel: #121924;
+    --border: #1f2a38;
+    --border-soft: #18202c;
+    --ink: #e8edf3;
+    --ink-dim: #9aa7b6;
+    --ink-faint: #61707f;
+    --green: #34d399;
+    --green-deep: #10b981;
+    --red: #f87171;
+    --amber: #fbbf24;
+    --blue: #60a5fa;
+    --accent: #34d399;
+    --mono: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace;
+    --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, Roboto, sans-serif;
+    --maxw: 1080px;
+  }
+  * { box-sizing: border-box; }
+  html { scroll-behavior: smooth; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--ink);
+    font-family: var(--sans);
+    line-height: 1.6;
+    -webkit-font-smoothing: antialiased;
+    background-image:
+      radial-gradient(60rem 40rem at 75% -10%, rgba(52, 211, 153, 0.07), transparent 60%),
+      radial-gradient(48rem 32rem at 5% 8%, rgba(96, 165, 250, 0.05), transparent 55%);
+    background-repeat: no-repeat;
+  }
+  a { color: var(--green); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  .wrap { max-width: var(--maxw); margin: 0 auto; padding: 0 24px; }
+  code, kbd, pre { font-family: var(--mono); }
+
+  header {
+    position: sticky; top: 0; z-index: 10;
+    backdrop-filter: blur(10px);
+    background: rgba(10, 13, 18, 0.72);
+    border-bottom: 1px solid var(--border-soft);
+  }
+  .nav { display: flex; align-items: center; justify-content: space-between; height: 60px; }
+  .brand { display: flex; align-items: center; gap: 9px; font-weight: 650; letter-spacing: -0.01em; font-size: 15px; }
+  .brand .glyph { font-size: 18px; }
+  .brand b { color: var(--ink); }
+  .nav-links { display: flex; align-items: center; gap: 22px; font-size: 14px; }
+  .nav-links a { color: var(--ink-dim); }
+  .nav-links a:hover { color: var(--ink); text-decoration: none; }
+  .nav-links a.current { color: var(--ink); }
+  .nav-cta {
+    color: var(--bg) !important; background: var(--green);
+    padding: 7px 14px; border-radius: 7px; font-weight: 600;
+  }
+  .nav-cta:hover { background: var(--green-deep); text-decoration: none; }
+  @media (max-width: 640px) { .nav-links .hide-sm { display: none; } }
+
+  .hero { padding: 56px 0 8px; border-top: 0; text-align: center; }
+  .eyebrow {
+    display: inline-flex; align-items: center; gap: 8px;
+    font-family: var(--mono); font-size: 12.5px; color: var(--green);
+    border: 1px solid var(--border); background: var(--bg-soft);
+    padding: 5px 12px; border-radius: 999px; margin-bottom: 22px;
+  }
+  .eyebrow .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--green); box-shadow: 0 0 10px var(--green); }
+  h1 {
+    font-size: clamp(30px, 4.6vw, 46px); line-height: 1.08;
+    letter-spacing: -0.03em; margin: 0 auto 18px; font-weight: 700;
+  }
+  h1 .accent { color: var(--green); }
+  .lede { font-size: clamp(16px, 1.9vw, 18.5px); color: var(--ink-dim); max-width: 560px; margin: 0 auto; }
+
+  section { padding: 56px 0; border-top: 1px solid var(--border-soft); }
+  .kicker { font-family: var(--mono); font-size: 12.5px; color: var(--green); letter-spacing: 0.04em; text-transform: uppercase; margin: 0 0 12px; }
+  h2 { font-size: clamp(22px, 3vw, 30px); letter-spacing: -0.02em; margin: 0 0 14px; font-weight: 680; }
+  .section-lede { color: var(--ink-dim); max-width: 680px; margin: 0 0 32px; font-size: 16px; }
+
+  /* ---- plan cards ---- */
+  .plans { display: grid; grid-template-columns: repeat(2, 1fr); gap: 20px; align-items: stretch; }
+  @media (max-width: 720px) { .plans { grid-template-columns: 1fr; } }
+  .plan {
+    border: 1px solid var(--border); border-radius: 14px; background: var(--panel);
+    padding: 30px 28px; display: flex; flex-direction: column;
+  }
+  .plan.pro { border-color: var(--green); position: relative; box-shadow: 0 0 0 1px var(--green), 0 24px 60px -30px rgba(52,211,153,0.25); }
+  .plan .badge {
+    position: absolute; top: -12px; left: 28px; background: var(--green); color: var(--bg);
+    font-size: 11.5px; font-weight: 700; letter-spacing: 0.03em; text-transform: uppercase;
+    padding: 4px 10px; border-radius: 999px;
+  }
+  .plan .name { font-size: 15px; font-weight: 650; color: var(--ink-dim); margin-bottom: 10px; }
+  .plan .price { font-size: 40px; font-weight: 700; letter-spacing: -0.02em; color: var(--ink); font-family: var(--mono); }
+  .plan .price .per { font-size: 15px; font-weight: 500; color: var(--ink-faint); font-family: var(--sans); }
+  .plan .desc { color: var(--ink-dim); font-size: 14.5px; margin: 10px 0 22px; }
+  .plan ul { list-style: none; margin: 0 0 26px; padding: 0; display: flex; flex-direction: column; gap: 11px; flex: 1; }
+  .plan li { display: flex; gap: 10px; font-size: 14.5px; color: var(--ink-dim); }
+  .plan li .ck { color: var(--green); flex: none; }
+  .plan .cta {
+    display: block; text-align: center; border-radius: 10px; padding: 13px 18px;
+    font-size: 15px; font-weight: 600; border: 1px solid var(--border);
+  }
+  .plan.free .cta { color: var(--ink); }
+  .plan.free .cta:hover { border-color: var(--ink-faint); text-decoration: none; }
+  .plan.pro .cta { background: var(--green); color: var(--bg) !important; border-color: var(--green); }
+  .plan.pro .cta:hover { background: var(--green-deep); text-decoration: none; }
+  .plan .fine { margin-top: 12px; font-size: 12.5px; color: var(--ink-faint); text-align: center; }
+
+  .callout {
+    border: 1px solid var(--border); border-left: 3px solid var(--green);
+    background: var(--panel); border-radius: 10px; padding: 22px 24px; color: var(--ink-dim);
+    font-size: 15.5px;
+  }
+  .callout b { color: var(--ink); }
+
+  .faq { display: flex; flex-direction: column; }
+  .qa {
+    border: 1px solid var(--border); border-radius: 10px; background: var(--panel);
+    padding: 18px 22px; margin-bottom: 12px;
+  }
+  .qa h3 { margin: 0 0 8px; font-size: 15.5px; color: var(--ink); }
+  .qa p { margin: 0; color: var(--ink-dim); font-size: 14.5px; }
+  .qa code { background: var(--bg-soft); border-radius: 4px; padding: 1px 6px; color: var(--ink-dim); }
+
+  footer { border-top: 1px solid var(--border-soft); padding: 40px 0 56px; color: var(--ink-faint); font-size: 14px; }
+  .foot-row { display: flex; flex-wrap: wrap; gap: 24px; justify-content: space-between; align-items: center; }
+  .foot-links { display: flex; gap: 22px; flex-wrap: wrap; }
+  .foot-links a { color: var(--ink-dim); }
+  .pill { display: inline-block; font-family: var(--mono); font-size: 11px; color: var(--ink-faint); border: 1px solid var(--border); border-radius: 999px; padding: 2px 9px; }
+</style>
+</head>
+<body>
+
+<header>
+  <div class="wrap nav">
+    <a href="/" class="brand" style="color:inherit"><span class="glyph">🛡️</span> <b>ClearToShip</b></a>
+    <nav class="nav-links">
+      <a href="/#coverage" class="hide-sm">Coverage</a>
+      <a href="/#how" class="hide-sm">How it works</a>
+      <a href="/pricing" class="current">Pricing</a>
+      <a href="/help" class="hide-sm">Help</a>
+      <a href="/#start" class="nav-cta">Get started</a>
+    </nav>
+  </div>
+</header>
+
+<main>
+  <section class="hero">
+    <div class="wrap">
+      <span class="eyebrow"><span class="dot"></span> One free tier, one paid tier — nothing else</span>
+      <h1>Simple pricing.<br><span class="accent">One paid tier.</span></h1>
+      <p class="lede">
+        Everything that catches dependency, secrets and error-handling problems is free
+        forever, no account. The rules that catch the most severe issues most often —
+        database permissions, Server Action auth, LLM/agent risk — are $5/month.
+      </p>
+    </div>
+  </section>
+
+  <!-- PLANS -->
+  <section style="padding-top:48px">
+    <div class="wrap">
+      <div class="plans">
+
+        <div class="plan free">
+          <div class="name">Free</div>
+          <div class="price">$0 <span class="per">forever</span></div>
+          <p class="desc">The dependency, secrets and error-handling checks. No account, no key, ever.</p>
+          <ul>
+            <li><span class="ck">✓</span> Hallucinated &amp; hostile dependency detection (npm, PyPI, live OSV CVEs)</li>
+            <li><span class="ck">✓</span> Secrets &amp; client-bundle scanning — 234 credential patterns, entropy-gated</li>
+            <li><span class="ck">✓</span> Logging, error-handling &amp; deserialization checks</li>
+            <li><span class="ck">✓</span> Full vendored community ruleset (GuardVibe, gitleaks)</li>
+            <li><span class="ck">✓</span> Runs on your machine or CI — nothing uploaded</li>
+          </ul>
+          <a href="/#start" class="cta">Get started free</a>
+          <p class="fine">MIT licensed, always.</p>
+        </div>
+
+        <div class="plan pro">
+          <span class="badge">Most coverage</span>
+          <div class="name">Pro</div>
+          <div class="price">$5 <span class="per">/ month</span></div>
+          <p class="desc">Everything in Free, plus the three suites that catch the most severe issues in AI-built apps.</p>
+          <ul>
+            <li><span class="ck">✓</span> Everything in Free</li>
+            <li><span class="ck">✓</span> Row Level Security suite — 13 rules for Supabase/Postgres</li>
+            <li><span class="ck">✓</span> Server Actions &amp; Route Handlers suite — 10 rules for Next.js</li>
+            <li><span class="ck">✓</span> LLM &amp; agent risk suite — 6 rules for prompt injection, runaway cost, unchecked agent actions</li>
+            <li><span class="ck">✓</span> Offline-verified license, no data collection beyond a revocation check</li>
+          </ul>
+          <!-- PAYPAL-LINK-PLACEHOLDER: swap this href for the real PayPal.me link or
+               subscription-button URL before this page goes live. Do not `wrangler deploy`
+               this site while this placeholder is still in place. -->
+          <a href="#pricing-paypal-not-yet-configured" class="cta">Get Pro — $5/mo</a>
+          <p class="fine">Cancel anytime — see below for how billing works right now.</p>
+        </div>
+
+      </div>
+    </div>
+  </section>
+
+  <!-- HOW BILLING WORKS -->
+  <section>
+    <div class="wrap">
+      <p class="kicker">Honesty, same as everywhere else on this site</p>
+      <h2>How billing actually works right now</h2>
+      <div class="callout">
+        <b>Pro billing is manual while automatic billing is still being built.</b> Paying
+        starts a PayPal payment to ClearToShip's maintainer directly — there's no checkout
+        flow or subscription automation yet. After paying, you'll get your license key by
+        email, typically within a few hours, valid for 30 days. A licensed install verifies
+        the key fully offline; a network call only happens periodically to check the key
+        hasn't been revoked, and it fails open if that check can't reach the server.
+      </div>
+    </div>
+  </section>
+
+  <!-- FAQ -->
+  <section>
+    <div class="wrap">
+      <p class="kicker">Before you pay</p>
+      <h2>Questions</h2>
+      <div class="faq">
+        <div class="qa">
+          <h3>What exactly do I get for $5/month?</h3>
+          <p>A license key for <code>cleartoship-rules-pro</code>: <code>npm install
+          cleartoship-rules-pro</code>, then <code>cleartoship pro login &lt;key&gt;</code>.
+          It runs alongside the free CLI and adds the RLS, Server Actions and LLM/agent
+          findings to the same report — nothing to configure separately.</p>
+        </div>
+        <div class="qa">
+          <h3>How do I cancel?</h3>
+          <p><a href="https://github.com/murtazaozdemir/cleartoship/issues">Open an
+          issue</a> asking to cancel, or just don't renew — nothing auto-charges you while
+          billing is manual. Your key keeps working until its 30-day term ends.</p>
+        </div>
+        <div class="qa">
+          <h3>Is $5/month the final price?</h3>
+          <p>It's the launch price, not a locked-in promise forever — but there are no
+          tiers, seats or usage limits to upsell into. If it changes, existing licenses are
+          honored through their current term.</p>
+        </div>
+        <div class="qa">
+          <h3>Do you offer refunds?</h3>
+          <p>If it doesn't do what this page said it does, <a href="https://github.com/murtazaozdemir/cleartoship/issues">open
+          an issue</a> and ask — handled case by case while this is still a one-person
+          operation.</p>
+        </div>
+        <div class="qa">
+          <h3>I don't understand what "RLS" or "LLM/agent risk" even means.</h3>
+          <p>Start with the <a href="/help">Help page</a> — it explains every check in
+          plain English, no security background assumed.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+</main>
+
+<footer>
+  <div class="wrap">
+    <div class="foot-row">
+      <div>
+        <a href="/" class="brand" style="margin-bottom:6px; color:inherit"><span class="glyph">🛡️</span> <b>ClearToShip</b></a>
+        <span class="pill">MIT</span>
+      </div>
+      <div class="foot-links">
+        <a href="/">Home</a>
+        <a href="/help">Help</a>
+        <a href="https://www.npmjs.com/package/cleartoship">npm</a>
+        <a href="https://www.npmjs.com/package/cleartoship#readme">Docs</a>
+      </div>
+    </div>
+    <p style="margin-top:24px; max-width:640px; color:var(--ink-faint)">
+      Pre-flight security for AI-built &amp; vibe-coded apps. Findings map to OWASP Top&nbsp;10:2025.
+    </p>
+  </div>
+</footer>
+
+</body>
+</html>

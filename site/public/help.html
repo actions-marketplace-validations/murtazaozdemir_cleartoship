@@ -1,0 +1,414 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="theme-color" content="#0a0d12">
+<title>Help — ClearToShip</title>
+<meta name="description" content="What ClearToShip actually checks, explained without security jargon. No account needed to understand your results.">
+<meta property="og:title" content="ClearToShip — Help">
+<meta property="og:description" content="What each finding means, in plain English, for people who didn't write the security code themselves.">
+<meta property="og:type" content="website">
+<meta property="og:url" content="https://cleartoship.app/help">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🛡️</text></svg>">
+<style>
+  :root {
+    --bg: #0a0d12;
+    --bg-soft: #10151c;
+    --panel: #121924;
+    --border: #1f2a38;
+    --border-soft: #18202c;
+    --ink: #e8edf3;
+    --ink-dim: #9aa7b6;
+    --ink-faint: #61707f;
+    --green: #34d399;
+    --green-deep: #10b981;
+    --red: #f87171;
+    --amber: #fbbf24;
+    --blue: #60a5fa;
+    --accent: #34d399;
+    --mono: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace;
+    --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, Roboto, sans-serif;
+    --maxw: 1080px;
+  }
+  * { box-sizing: border-box; }
+  html { scroll-behavior: smooth; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--ink);
+    font-family: var(--sans);
+    line-height: 1.6;
+    -webkit-font-smoothing: antialiased;
+    background-image:
+      radial-gradient(60rem 40rem at 75% -10%, rgba(52, 211, 153, 0.07), transparent 60%),
+      radial-gradient(48rem 32rem at 5% 8%, rgba(96, 165, 250, 0.05), transparent 55%);
+    background-repeat: no-repeat;
+  }
+  a { color: var(--green); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  .wrap { max-width: var(--maxw); margin: 0 auto; padding: 0 24px; }
+  code, kbd, pre { font-family: var(--mono); }
+
+  header {
+    position: sticky; top: 0; z-index: 10;
+    backdrop-filter: blur(10px);
+    background: rgba(10, 13, 18, 0.72);
+    border-bottom: 1px solid var(--border-soft);
+  }
+  .nav { display: flex; align-items: center; justify-content: space-between; height: 60px; }
+  .brand { display: flex; align-items: center; gap: 9px; font-weight: 650; letter-spacing: -0.01em; font-size: 15px; }
+  .brand .glyph { font-size: 18px; }
+  .brand b { color: var(--ink); }
+  .nav-links { display: flex; align-items: center; gap: 22px; font-size: 14px; }
+  .nav-links a { color: var(--ink-dim); }
+  .nav-links a:hover { color: var(--ink); text-decoration: none; }
+  .nav-links a.current { color: var(--ink); }
+  .nav-cta {
+    color: var(--bg) !important; background: var(--green);
+    padding: 7px 14px; border-radius: 7px; font-weight: 600;
+  }
+  .nav-cta:hover { background: var(--green-deep); text-decoration: none; }
+  @media (max-width: 640px) { .nav-links .hide-sm { display: none; } }
+
+  .hero { padding: 56px 0 8px; border-top: 0; }
+  .eyebrow {
+    display: inline-flex; align-items: center; gap: 8px;
+    font-family: var(--mono); font-size: 12.5px; color: var(--green);
+    border: 1px solid var(--border); background: var(--bg-soft);
+    padding: 5px 12px; border-radius: 999px; margin-bottom: 22px;
+  }
+  .eyebrow .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--green); box-shadow: 0 0 10px var(--green); }
+  h1 {
+    font-size: clamp(30px, 4.6vw, 46px); line-height: 1.08;
+    letter-spacing: -0.03em; margin: 0 0 18px; font-weight: 700;
+  }
+  h1 .accent { color: var(--green); }
+  .lede { font-size: clamp(16px, 1.9vw, 18.5px); color: var(--ink-dim); max-width: 640px; margin: 0; }
+
+  section { padding: 56px 0; border-top: 1px solid var(--border-soft); }
+  .kicker { font-family: var(--mono); font-size: 12.5px; color: var(--green); letter-spacing: 0.04em; text-transform: uppercase; margin: 0 0 12px; }
+  h2 { font-size: clamp(22px, 3vw, 30px); letter-spacing: -0.02em; margin: 0 0 14px; font-weight: 680; }
+  .section-lede { color: var(--ink-dim); max-width: 680px; margin: 0 0 32px; font-size: 16px; }
+
+  /* ---- explainer cards ---- */
+  .cards { display: grid; grid-template-columns: repeat(2, 1fr); gap: 18px; }
+  @media (max-width: 760px) { .cards { grid-template-columns: 1fr; } }
+  .card {
+    border: 1px solid var(--border); border-radius: 12px; background: var(--panel);
+    padding: 24px;
+  }
+  .card h3 { margin: 0 0 10px; font-size: 17px; display: flex; align-items: center; gap: 10px; }
+  .card h3 .ic { font-size: 19px; }
+  .card p { margin: 0 0 12px; color: var(--ink-dim); font-size: 14.5px; }
+  .card p:last-child { margin-bottom: 0; }
+  .card .analogy {
+    font-size: 13.5px; color: var(--ink-faint); border-left: 2px solid var(--border);
+    padding-left: 12px; margin-top: 14px;
+  }
+  .card .tech {
+    margin-top: 14px; font-size: 12px; color: var(--ink-faint); font-family: var(--mono);
+  }
+  .card .tech a { color: var(--ink-faint); }
+  .card .tech a:hover { color: var(--green); }
+
+  /* ---- faq ---- */
+  .faq { display: flex; flex-direction: column; gap: 2px; }
+  .qa {
+    border: 1px solid var(--border); border-radius: 10px; background: var(--panel);
+    padding: 18px 22px; margin-bottom: 12px;
+  }
+  .qa h3 { margin: 0 0 8px; font-size: 15.5px; color: var(--ink); }
+  .qa p { margin: 0; color: var(--ink-dim); font-size: 14.5px; }
+  .qa p + p { margin-top: 8px; }
+  .qa code { background: var(--bg-soft); border-radius: 4px; padding: 1px 6px; color: var(--ink-dim); }
+
+  /* ---- severity key ---- */
+  .sevkey { display: flex; flex-wrap: wrap; gap: 12px; margin: 0 0 32px; }
+  .sevkey .item {
+    display: flex; align-items: center; gap: 8px; font-size: 13.5px; color: var(--ink-dim);
+    border: 1px solid var(--border); border-radius: 999px; padding: 6px 14px; background: var(--panel);
+  }
+  .sevkey .dot { width: 8px; height: 8px; border-radius: 50%; flex: none; }
+  .sev-c { background: var(--red); } .sev-h { background: var(--amber); } .sev-m { background: var(--blue); } .sev-l { background: var(--ink-faint); }
+
+  .callout {
+    border: 1px solid var(--border); border-left: 3px solid var(--green);
+    background: var(--panel); border-radius: 10px; padding: 22px 24px; color: var(--ink-dim);
+    font-size: 15.5px;
+  }
+  .callout b { color: var(--ink); }
+  .callout + .callout { margin-top: 14px; }
+
+  footer { border-top: 1px solid var(--border-soft); padding: 40px 0 56px; color: var(--ink-faint); font-size: 14px; }
+  .foot-row { display: flex; flex-wrap: wrap; gap: 24px; justify-content: space-between; align-items: center; }
+  .foot-links { display: flex; gap: 22px; flex-wrap: wrap; }
+  .foot-links a { color: var(--ink-dim); }
+  .pill { display: inline-block; font-family: var(--mono); font-size: 11px; color: var(--ink-faint); border: 1px solid var(--border); border-radius: 999px; padding: 2px 9px; }
+</style>
+</head>
+<body>
+
+<header>
+  <div class="wrap nav">
+    <a href="/" class="brand" style="color:inherit"><span class="glyph">🛡️</span> <b>ClearToShip</b></a>
+    <nav class="nav-links">
+      <a href="/#coverage" class="hide-sm">Coverage</a>
+      <a href="/pricing" class="hide-sm">Pricing</a>
+      <a href="/help" class="current">Help</a>
+      <a href="/#start" class="nav-cta">Get started</a>
+    </nav>
+  </div>
+</header>
+
+<main>
+  <section class="hero">
+    <div class="wrap">
+      <span class="eyebrow"><span class="dot"></span> Written for people who didn't write the security code</span>
+      <h1>What ClearToShip actually checks<br><span class="accent">— no jargon.</span></h1>
+      <p class="lede">
+        If you used Cursor, Claude Code, v0 or Lovable to build this and a scan came back with
+        findings you don't understand, you're the reader this page is for. Every category below
+        is the same thing the tool checks — just explained the way you'd explain it to a
+        co-founder, not a security team.
+      </p>
+    </div>
+  </section>
+
+  <!-- WHAT IS THIS -->
+  <section style="padding-top:48px">
+    <div class="wrap">
+      <p class="kicker">First, the basics</p>
+      <h2>What is a "security scanner," really?</h2>
+      <p class="section-lede">
+        It's a program that reads your code the way a careful reviewer would, looking for a
+        specific list of mistakes that are common, well understood, and usually invisible until
+        someone exploits them. It doesn't run your app or guess at your intentions — it looks for
+        patterns: a database table anyone can read, a password typed directly into a file, a
+        button that saves data without checking who clicked it.
+      </p>
+      <div class="callout">
+        <b>You don't need to know security to use the results.</b> Every finding names the exact
+        file and line, explains what's wrong in one sentence, and — for the checks the free tier
+        covers — <code>--fix-prompt</code> turns it into an instruction you can hand straight back
+        to whatever AI tool wrote the code.
+      </div>
+    </div>
+  </section>
+
+  <!-- SEVERITY -->
+  <section>
+    <div class="wrap">
+      <p class="kicker">Reading a result</p>
+      <h2>What "Critical," "High," "Medium" and "Low" mean</h2>
+      <p class="section-lede">
+        Not every finding is equally urgent. Severity is ClearToShip's best guess at how bad it
+        would be if this specific gap were the one someone found first.
+      </p>
+      <div class="sevkey">
+        <span class="item"><span class="dot sev-c"></span><b style="color:var(--ink)">Critical</b> — someone could take or destroy real data or money today, with no special access</span>
+        <span class="item"><span class="dot sev-h"></span><b style="color:var(--ink)">High</b> — a real weakness, but it needs some extra condition to be exploited</span>
+        <span class="item"><span class="dot sev-m"></span><b style="color:var(--ink)">Medium</b> — worth fixing before it matters, not an emergency</span>
+        <span class="item"><span class="dot sev-l"></span><b style="color:var(--ink)">Low</b> — a defense-in-depth gap, not a live hole</span>
+      </div>
+      <p class="section-lede" style="margin-bottom:0">
+        The default rule of thumb: don't launch with an open Critical. Everything else can usually
+        wait for the next release.
+      </p>
+    </div>
+  </section>
+
+  <!-- CATEGORIES -->
+  <section>
+    <div class="wrap">
+      <p class="kicker">The six questions it's actually asking</p>
+      <h2>Every finding is one of these, underneath</h2>
+      <p class="section-lede">
+        The technical names for these (OWASP Top 10, CWE numbers, rule IDs like <code>CTS001</code>)
+        are in the <a href="https://github.com/murtazaozdemir/cleartoship#what-it-checks">full
+        rule tables</a> and the <a href="https://github.com/murtazaozdemir/cleartoship/blob/main/docs/OWASP.md">standards
+        explainer</a>, for anyone who wants them. Here's what each one is actually asking, in order.
+      </p>
+
+      <div class="cards">
+
+        <div class="card">
+          <h3><span class="ic">🚪</span> Can a stranger see or change data they shouldn't?</h3>
+          <p>
+            This is the single most common gap. An AI coding tool will happily write a button
+            that saves, deletes, or updates something — and forget to check <em>who</em> is
+            clicking it, or whether the data belongs to them at all.
+          </p>
+          <div class="analogy">
+            Like a filing cabinet with everyone's records in it, and the lock is on the room, not
+            the individual drawers — anyone who gets in can pull any folder.
+          </div>
+          <div class="tech">Technical names: Broken Access Control, missing Row Level Security, IDOR</div>
+        </div>
+
+        <div class="card">
+          <h3><span class="ic">🔑</span> Are your passwords and secret keys out in the open?</h3>
+          <p>
+            A "key" here means a password-like string your app uses to talk to another
+            service — your database, Stripe, OpenAI. If one of these ends up typed directly into
+            your code, committed to git, or sent to the browser, anyone who sees that code (or
+            your site's source) can use it as if they were you.
+          </p>
+          <div class="analogy">
+            Like leaving the office key taped under the doormat — convenient for you, and for
+            whoever else finds it.
+          </div>
+          <div class="tech">Technical names: Hardcoded secrets, exposed credentials, client-side key leakage</div>
+        </div>
+
+        <div class="card">
+          <h3><span class="ic">💉</span> Could someone sneak instructions into your app?</h3>
+          <p>
+            This is what happens when your app takes something a stranger typed — a search box, a
+            form, a URL — and treats part of it as a command instead of plain text. The classic
+            version targets your database; a newer version targets your AI model, by hiding
+            instructions inside text it's asked to read.
+          </p>
+          <div class="analogy">
+            Like a note that says "and also, unlock the safe" slipped into a stack of paperwork
+            someone was told to process without reading closely.
+          </div>
+          <div class="tech">Technical names: SQL Injection, Cross-Site Scripting, Prompt Injection</div>
+        </div>
+
+        <div class="card">
+          <h3><span class="ic">📦</span> Are you accidentally installing something malicious?</h3>
+          <p>
+            AI tools sometimes invent a package name that sounds right but doesn't exist —
+            and someone else can register that exact name on npm with real malware inside,
+            betting that it'll get installed by accident. This checks whether every package
+            you depend on is real, spelled correctly, and not one of these known traps.
+          </p>
+          <div class="analogy">
+            Like ordering a part by a name your supplier misheard, and a scammer happens to sell
+            something under that exact misheard name.
+          </div>
+          <div class="tech">Technical names: Dependency/supply-chain risk, hallucinated packages, typosquatting</div>
+        </div>
+
+        <div class="card">
+          <h3><span class="ic">🤖</span> Could your AI feature be tricked, or run up a huge bill?</h3>
+          <p>
+            If your app calls an AI model or lets an AI agent take actions on its own (send
+            email, delete a record, spend money), this asks three things: can outside text hijack
+            what the model does, is there anything stopping a single request from costing you
+            $500 in API usage, and does anything just <em>trust</em> what the model says without a
+            person checking first.
+          </p>
+          <div class="analogy">
+            Like hiring a very fast, very literal assistant, handing them your credit card, and
+            never telling them there's a spending limit.
+          </div>
+          <div class="tech">Technical names: OWASP Top 10 for LLM Applications — Excessive Agency, Unbounded Consumption, Misinformation</div>
+        </div>
+
+        <div class="card">
+          <h3><span class="ic">🚨</span> What happens when something goes wrong?</h3>
+          <p>
+            Every app eventually gets an error, a weird input, or a request it wasn't expecting.
+            This checks whether that failure is handled safely — and whether anyone would even
+            find out it happened. A security-relevant error that's silently swallowed, or that
+            fails by opening the door instead of closing it, is its own kind of gap.
+          </p>
+          <div class="analogy">
+            Like a fire alarm that's wired to turn itself off the moment it starts going off.
+          </div>
+          <div class="tech">Technical names: Logging & Alerting Failures, Mishandling of Exceptional Conditions</div>
+        </div>
+
+      </div>
+    </div>
+  </section>
+
+  <!-- FAQ -->
+  <section>
+    <div class="wrap">
+      <p class="kicker">Common questions</p>
+      <h2>Before you run it</h2>
+      <div class="faq">
+        <div class="qa">
+          <h3>Do I need a security background to use this?</h3>
+          <p>No. That's what this page is for. Every finding names a file, a line, and one plain
+          sentence about what's wrong — you don't need to know the OWASP category to act on it.</p>
+        </div>
+        <div class="qa">
+          <h3>Does it upload my code anywhere?</h3>
+          <p>No. It runs entirely on your machine or CI runner and reads your files locally. The
+          only network calls it makes (and only when you're online) are anonymous lookups of
+          package <em>names</em> — never file contents, never your code — to check whether a
+          dependency exists and is safe. <code>--offline</code> turns even that off. See
+          <a href="https://github.com/murtazaozdemir/cleartoship/blob/main/SECURITY.md">SECURITY.md</a>
+          for exactly what leaves your machine and how to verify it yourself.</p>
+        </div>
+        <div class="qa">
+          <h3>I don't understand a specific finding. What do I do?</h3>
+          <p>Run it with <code>--fix-prompt</code> — it turns the finding into an instruction you
+          can paste directly back into Cursor, Claude Code, or whatever tool wrote the code, and
+          have it explain and fix the specific line for you.</p>
+        </div>
+        <div class="qa">
+          <h3>Will this slow down my launch?</h3>
+          <p>It's designed not to. A typical scan finishes in under 30 seconds, needs no account,
+          and no setup beyond running one command.</p>
+        </div>
+        <div class="qa">
+          <h3>What's "OWASP," and why does every finding mention it?</h3>
+          <p>OWASP is a nonprofit that maintains a public, community-written list of the most
+          common ways real applications get broken into. ClearToShip doesn't invent its own
+          categories — every finding is checked against that published list (and a companion list
+          specific to AI/LLM apps), so the labels mean the same thing here as they do everywhere
+          else in the industry. The full breakdown of both lists, still in plain language, is in
+          the <a href="https://github.com/murtazaozdemir/cleartoship/blob/main/docs/OWASP.md">standards
+          explainer</a> if you want it.</p>
+        </div>
+        <div class="qa">
+          <h3>Some checks say "Pro" — what's the difference?</h3>
+          <p>The dependency, secrets, and error-handling checks above are free forever, no
+          account needed. The database-permissions, Server-Action-authorization, and AI/agent
+          checks are the ones that catch the most severe issues most often — those are the
+          licensed Pro tier. See the main page for what's included in each.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <div class="wrap">
+      <div class="callout">
+        Still stuck, or found something this page should explain but doesn't?
+        <a href="https://github.com/murtazaozdemir/cleartoship/issues">Open an issue</a> —
+        a confusing explanation is a bug in this page, not a reason to feel bad about not knowing
+        the jargon.
+      </div>
+    </div>
+  </section>
+</main>
+
+<footer>
+  <div class="wrap">
+    <div class="foot-row">
+      <div>
+        <a href="/" class="brand" style="margin-bottom:6px; color:inherit"><span class="glyph">🛡️</span> <b>ClearToShip</b></a>
+        <span class="pill">MIT</span>
+      </div>
+      <div class="foot-links">
+        <a href="/">Home</a>
+        <a href="/pricing">Pricing</a>
+        <a href="https://www.npmjs.com/package/cleartoship">npm</a>
+        <a href="https://www.npmjs.com/package/cleartoship#readme">Docs</a>
+        <a href="/#coverage">Coverage</a>
+      </div>
+    </div>
+    <p style="margin-top:24px; max-width:640px; color:var(--ink-faint)">
+      Pre-flight security for AI-built &amp; vibe-coded apps. Findings map to OWASP Top&nbsp;10:2025.
+    </p>
+  </div>
+</footer>
+
+</body>
+</html>
