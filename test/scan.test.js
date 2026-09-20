@@ -27,7 +27,7 @@ const ids = (result) => new Set(result.findings.map((f) => f.id));
 test('vulnerable fixture: reports every free-tier rule it is built to trigger', async () => {
   // CTS001-004, 010-019, 041-046, 050-052 (Server Actions & RLS) and 080-085
   // (LLM/agent) moved to the licensed cleartoship-rules-pro package — see
-  // packages/rules-pro/test/{rls,server-actions,agent-logic}.test.js for their
+  // the private cleartoship-rules-pro repo's test/{rls,server-actions,agent-logic}.test.js for their
   // coverage, both licensed and (absent) unlicensed. CTS040 and CTS045 stay
   // here: despite the numbering, they are implemented in the free secrets
   // scanner, not the Server Actions scanner.
