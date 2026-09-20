@@ -62,6 +62,35 @@ jobs:
           echo "Live version before deploy: ${v:-none}"
           echo "version=$v" >> "$GITHUB_OUTPUT"
 
+      # The install path that does not depend on npm: the standalone build is served
+      # from this domain, so `curl -fsSL https://cleartoship.app/cleartoship.mjs`
+      # works with nothing else in the loop.
+      #
+      # Fetched from the GitHub Release at deploy time rather than committed, and
+      # ONLY when a release exists for the exact version this commit declares.
+      # Serving "whatever is latest" would hand out a build that does not match
+      # this source — v0.13.5 still contains the rules that moved to the private
+      # Pro package. With no matching release the site simply deploys without the
+      # files, and release.yml redeploys once the release exists.
+      - name: Fetch this version's standalone build into the site
+        id: dist
+        working-directory: .
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          ver=$(node -p "require('./package.json').version")
+          tag="v${ver}"
+          if gh release view "$tag" >/dev/null 2>&1; then
+            gh release download "$tag" --dir site/public \
+              --pattern cleartoship.mjs --pattern cleartoship-standalone.tgz --clobber
+            (cd site/public && sha256sum cleartoship.mjs cleartoship-standalone.tgz > SHA256SUMS)
+            echo "served=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::Serving the ${tag} standalone build from the site."
+          else
+            echo "served=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::No release ${tag} yet, so the site deploys without the download files. release.yml redeploys once it exists."
+          fi
+
       - name: Deploy to Cloudflare
         # Pinned to a commit: this step holds the Cloudflare token, and a
         # mutable tag can be re-pointed at code that reads it. Dependabot's
@@ -95,3 +124,22 @@ jobs:
             exit 1
           fi
           echo "::notice::Landing page deployed. Live version is now $after."
+
+      # Same rule as above, applied to the thing this step exists to publish: the
+      # deploy being green proves nothing about what the domain serves. Fetch it
+      # back and compare it byte for byte with the release asset.
+      - name: Confirm the domain serves exactly the release build
+        if: steps.dist.outputs.served == 'true'
+        run: |
+          want=$(grep ' cleartoship.mjs$' public/SHA256SUMS | cut -d' ' -f1)
+          got=""
+          for attempt in 1 2 3 4 5 6; do
+            got=$(curl -fsSL -H 'Cache-Control: no-cache' https://cleartoship.app/cleartoship.mjs | sha256sum | cut -d' ' -f1 || true)
+            if [ "$got" = "$want" ]; then
+              echo "::notice::cleartoship.app/cleartoship.mjs matches the release asset (sha256 $want)."
+              exit 0
+            fi
+            sleep 10
+          done
+          echo "::error::cleartoship.app/cleartoship.mjs does not match the release asset. Wanted $want, got ${got:-nothing}."
+          exit 1

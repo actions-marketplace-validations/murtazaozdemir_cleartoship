@@ -25,3 +25,8 @@ standalone/
 # `npx skills` manager state. The skill itself is tracked in .claude/skills/.
 .agents/
 skills-lock.json
+
+# Fetched from the GitHub Release at deploy time by deploy-site.yml — never committed.
+site/public/cleartoship.mjs
+site/public/cleartoship-standalone.tgz
+site/public/SHA256SUMS

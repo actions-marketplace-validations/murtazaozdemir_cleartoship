@@ -16,6 +16,7 @@ concurrency:
 permissions:
   contents: write   # for the GitHub Release
   id-token: write   # for the Sigstore OIDC token that signs provenance
+  actions: write    # to dispatch the site deploy that serves this release
 
 jobs:
   publish:
@@ -107,6 +108,15 @@ jobs:
           base="https://github.com/${GITHUB_REPOSITORY}/releases/latest/download"
           echo "Runs with no package manager involved:"
           echo "  curl -fsSL ${base}/cleartoship.mjs -o cleartoship.mjs && node cleartoship.mjs"
+
+      # Also ahead of the npm steps, for the same reason as the release above: they
+      # fail while npm is broken, and this must not wait on them. The site fetches
+      # this release's standalone build at deploy time, so it has to be redeployed
+      # once the release exists.
+      - name: Redeploy the site so cleartoship.app serves this release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow run deploy-site.yml --ref main
 
       - name: Check the npm token before publishing
         env:
