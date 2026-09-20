@@ -29,7 +29,7 @@ inputs:
   version:
     description: >-
       Version of the cleartoship npm package to run. Defaults to the version this
-      action's own ref declares, so `uses: …@v0.13.5` runs cleartoship@0.13.5. Set
+      action's own ref declares, so `uses: …@v0.13.6` runs cleartoship@0.13.6. Set
       `latest` to always track the newest release, or `local` to build from the checkout.
     required: false
     default: ''
