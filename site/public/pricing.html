@@ -5,9 +5,9 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="theme-color" content="#0a0d12">
 <title>Pricing — ClearToShip</title>
-<meta name="description" content="ClearToShip is free forever for dependency, secrets and error-handling checks. Pro is $5/month for the Row Level Security, Server Actions and LLM/agent rule suites.">
+<meta name="description" content="ClearToShip is free while in beta. A paid Pro tier for the Row Level Security, Server Actions and LLM/agent rule suites is planned, but nothing is on sale yet.">
 <meta property="og:title" content="ClearToShip — Pricing">
-<meta property="og:description" content="Free forever, or $5/month for the RLS, Server Actions and LLM/agent checks.">
+<meta property="og:description" content="Free while in beta. A Pro tier for the RLS, Server Actions and LLM/agent checks is planned.">
 <meta property="og:type" content="website">
 <meta property="og:url" content="https://cleartoship.app/pricing">
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🛡️</text></svg>">
@@ -162,12 +162,13 @@
 <main>
   <section class="hero">
     <div class="wrap">
-      <span class="eyebrow"><span class="dot"></span> One free tier, one paid tier — nothing else</span>
-      <h1>Simple pricing.<br><span class="accent">One paid tier.</span></h1>
+      <span class="eyebrow"><span class="dot"></span> Free while in beta</span>
+      <h1>Free for now.<br><span class="accent">Pro is coming.</span></h1>
       <p class="lede">
         Everything that catches dependency, secrets and error-handling problems is free
-        forever, no account. The rules that catch the most severe issues most often —
-        database permissions, Server Action auth, LLM/agent risk — are $5/month.
+        forever, no account. The rules that catch the most severe issues — database
+        permissions, Server Action auth, LLM/agent risk — will be a paid Pro tier. It
+        isn't on sale yet, so there is nothing to pay today.
       </p>
     </div>
   </section>
@@ -193,9 +194,9 @@
         </div>
 
         <div class="plan pro">
-          <span class="badge">Most coverage</span>
+          <span class="badge">Coming</span>
           <div class="name">Pro</div>
-          <div class="price">$5 <span class="per">/ month</span></div>
+          <div class="price">Not on sale <span class="per">yet</span></div>
           <p class="desc">Everything in Free, plus the three suites that catch the most severe issues in AI-built apps.</p>
           <ul>
             <li><span class="ck">✓</span> Everything in Free</li>
@@ -204,11 +205,10 @@
             <li><span class="ck">✓</span> LLM &amp; agent risk suite — 6 rules for prompt injection, runaway cost, unchecked agent actions</li>
             <li><span class="ck">✓</span> Offline-verified license, no data collection beyond a revocation check</li>
           </ul>
-          <!-- PAYPAL-LINK-PLACEHOLDER: swap this href for the real PayPal.me link or
-               subscription-button URL before this page goes live. Do not `wrangler deploy`
-               this site while this placeholder is still in place. -->
-          <a href="#pricing-paypal-not-yet-configured" class="cta">Get Pro — $5/mo</a>
-          <p class="fine">Cancel anytime — see below for how billing works right now.</p>
+          <!-- Deliberately not a link: there is nothing to buy yet. When billing exists,
+               replace this span with the real checkout link. -->
+          <span class="cta" aria-disabled="true" style="opacity:.55;cursor:default">Not on sale yet</span>
+          <p class="fine">Planned launch price: $5/month. No payment is being taken.</p>
         </div>
 
       </div>
@@ -219,14 +219,12 @@
   <section>
     <div class="wrap">
       <p class="kicker">Honesty, same as everywhere else on this site</p>
-      <h2>How billing actually works right now</h2>
+      <h2>Nothing to buy yet</h2>
       <div class="callout">
-        <b>Pro billing is manual while automatic billing is still being built.</b> Paying
-        starts a PayPal payment to ClearToShip's maintainer directly — there's no checkout
-        flow or subscription automation yet. After paying, you'll get your license key by
-        email, typically within a few hours, valid for 30 days. A licensed install verifies
-        the key fully offline; a network call only happens periodically to check the key
-        hasn't been revoked, and it fails open if that check can't reach the server.
+        <b>Pro isn't on sale.</b> There is no checkout, no payment link and no license to
+        buy while ClearToShip is in beta. When Pro launches it will be announced here and
+        in the GitHub README, with how billing works spelled out before you pay anything.
+        The planned launch price is $5/month: one tier, no seats, no usage limits.
       </div>
     </div>
   </section>
@@ -234,33 +232,25 @@
   <!-- FAQ -->
   <section>
     <div class="wrap">
-      <p class="kicker">Before you pay</p>
+      <p class="kicker">Before you start</p>
       <h2>Questions</h2>
       <div class="faq">
         <div class="qa">
-          <h3>What exactly do I get for $5/month?</h3>
-          <p>A license key for <code>cleartoship-rules-pro</code>: <code>npm install
-          cleartoship-rules-pro</code>, then <code>cleartoship pro login &lt;key&gt;</code>.
-          It runs alongside the free CLI and adds the RLS, Server Actions and LLM/agent
-          findings to the same report — nothing to configure separately.</p>
+          <h3>Is ClearToShip really free?</h3>
+          <p>Yes. The open-source tool — dependency, secrets and error-handling checks and
+          the community ruleset — is MIT licensed, runs on your machine, and needs no
+          account or key.</p>
         </div>
         <div class="qa">
-          <h3>How do I cancel?</h3>
-          <p><a href="https://github.com/murtazaozdemir/cleartoship/issues">Open an
-          issue</a> asking to cancel, or just don't renew — nothing auto-charges you while
-          billing is manual. Your key keeps working until its 30-day term ends.</p>
+          <h3>What will Pro add, and when?</h3>
+          <p>The Row Level Security, Server Actions and LLM/agent suites, in the same
+          report. There is no date yet; it isn't on sale and there is nothing to install
+          or configure today.</p>
         </div>
         <div class="qa">
-          <h3>Is $5/month the final price?</h3>
-          <p>It's the launch price, not a locked-in promise forever — but there are no
-          tiers, seats or usage limits to upsell into. If it changes, existing licenses are
-          honored through their current term.</p>
-        </div>
-        <div class="qa">
-          <h3>Do you offer refunds?</h3>
-          <p>If it doesn't do what this page said it does, <a href="https://github.com/murtazaozdemir/cleartoship/issues">open
-          an issue</a> and ask — handled case by case while this is still a one-person
-          operation.</p>
+          <h3>Will anything that's free now stop being free?</h3>
+          <p>No. What is free stays free and MIT licensed. Pro would add rules on top; it
+          wouldn't take any away.</p>
         </div>
         <div class="qa">
           <h3>I don't understand what "RLS" or "LLM/agent risk" even means.</h3>

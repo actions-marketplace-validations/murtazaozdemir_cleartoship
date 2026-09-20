@@ -141,8 +141,9 @@ avoid.
 ## Pricing
 
 **Open-core, built but not launched.** The RLS, Server Actions and LLM/agent
-suites moved into a separate `packages/rules-pro` workspace member
-(`cleartoship-rules-pro`), license-gated by a locally-verified, offline-first
+suites moved into a separate, **private** repository — `cleartoship-rules-pro`,
+checked out beside this one at `../cleartoship-rules-pro` and never pushed
+to this public repo — license-gated by a locally-verified, offline-first
 signed token with best-effort revocation checking against a Worker+D1 server
 under `site/`. Everything free stays MIT and unchanged. Not live: no license
 has ever been sold, and Stripe isn't wired up (see "Wire up Stripe billing"
@@ -150,27 +151,25 @@ above) — first licenses will be issued manually against PayPal payments
 instead. The D1 database (`cleartoship-licenses`) was created 2026-09-07 and
 `site/wrangler.jsonc`'s `database_id` points at it; the `0001_licenses.sql`
 migration is applied on the remote. Still open:
-`packages/rules-pro`'s dependency on `cleartoship` is a local `file:` reference
+`cleartoship-rules-pro`'s dependency on `cleartoship` is a local `file:` reference
 that has to become a real npm semver range before it can be published itself,
 and none of this can go live before the npm-republish blocker two paragraphs
 up is fixed — a licensed pro package plugging into a free package nobody can
 `npx install` doesn't do anything.
 
-**Price: $5/month, decided 2026-09-07.** One tier, no seats, no usage limits.
-`site/public/pricing.html` (linked from nav/footer on `/` and `/help`) has the
-Free-vs-Pro comparison and an honest "billing is manual right now" callout —
-but its "Get Pro" button still points at a placeholder
-(`#pricing-paypal-not-yet-configured`, marked with a `PAYPAL-LINK-PLACEHOLDER`
-comment in the HTML). **Do not `wrangler deploy` the site until that's swapped
-for a real PayPal.me link or subscription button** — three options were on the
-table (real PayPal subscription button, plain paypal.me link paid manually
-each month, or ship the page now with a placeholder); the placeholder was
-chosen so the page's design could be reviewed before committing to either
-mechanism. Also still needed once a real link exists: the
-`/admin/license/issue` endpoint (bearer-token-gated, mirrors the Stripe
-webhook's `upsertLicense`/`signLicenseToken` calls) that actually turns a
-payment notification into a delivered key — designed in conversation, not yet
-built.
+**Price: $5/month, decided 2026-09-07 — planned, not on sale.** One tier, no
+seats, no usage limits. As of 2026-09-20 `site/public/pricing.html` (linked from
+nav/footer on `/` and `/help`) says so plainly: **free while in beta, Pro
+coming, nothing to buy.** The "Get Pro" button and its `PAYPAL-LINK-PLACEHOLDER`
+were removed rather than left pointing at a dead anchor, along with the "manual
+PayPal billing" callout and the cancel/refund FAQ answers that described a
+purchase flow that does not exist — so the placeholder no longer blocks
+`wrangler deploy`. When there is something to sell: replace the disabled
+"Not on sale yet" span with the real checkout link, restore the billing
+explanation, and build the `/admin/license/issue` endpoint (bearer-token-gated,
+mirrors the Stripe webhook's `upsertLicense`/`signLicenseToken` calls) that
+turns a payment notification into a delivered key — designed in conversation,
+not yet built.
 
 No price has been set. Still no tiers beyond the one Pro bundle.
 
