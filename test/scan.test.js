@@ -540,6 +540,27 @@ test('vendored rules add coverage without duplicating our own', async () => {
   }
 });
 
+test('a rule whose match opens with a newline is reported on its own line, not the one before', async () => {
+  // VG1070 opens with `(?:^|\n)\s*`, so the match starts on the newline that
+  // ends the previous line. It used to be reported one line early — here, on
+  // the `echo` step rather than the `npm ci` step under it.
+  const { mkdtempSync, mkdirSync, writeFileSync } = await import('node:fs');
+  const { tmpdir } = await import('node:os');
+  const dir = mkdtempSync(join(tmpdir(), 'cts-line-'));
+  mkdirSync(join(dir, '.github', 'workflows'), { recursive: true });
+  writeFileSync(join(dir, 'package.json'), '{"name":"t","version":"1.0.0"}');
+  writeFileSync(
+    join(dir, '.github', 'workflows', 'ci.yml'),
+    ['name: ci', 'on: push', 'jobs:', '  x:', '    runs-on: ubuntu-latest', '    steps:',
+      '      - run: echo hello', '      - run: npm ci', ''].join('\n'),
+  );
+  const result = await scan({ root: dir, offline: true });
+  const finding = result.findings.find((f) => f.id === 'VG1070');
+  assert.ok(finding, 'the unhardened npm ci should be reported');
+  assert.equal(finding.line, 8, 'the finding belongs on the npm ci line');
+  assert.match(finding.snippet, /npm ci/);
+});
+
 test('suppression directives work from the top of a comment block', () => {
   const sup = new Suppressions(
     [

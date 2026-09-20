@@ -518,7 +518,10 @@ export const communityScanner: Scanner = {
             if (!re.global) break;
             continue;
           }
-          const line = lineAt(source, m.index);
+          // Some rules open with `(?:^|\n)\s*`, so the match starts on the
+          // newline ending the previous line. Locate the first character that
+          // is actually part of the finding, or it is reported one line early.
+          const line = lineAt(source, m.index + (m[0].length - m[0].trimStart().length));
           const key = `${relPath}:${line}:${rule.id}`;
           if (!seen.has(key) && !suppress.suppressed(line, rule.id)) {
             seen.add(key);
