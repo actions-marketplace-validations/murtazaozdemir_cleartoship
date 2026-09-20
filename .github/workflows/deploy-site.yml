@@ -63,7 +63,10 @@ jobs:
           echo "version=$v" >> "$GITHUB_OUTPUT"
 
       - name: Deploy to Cloudflare
-        uses: cloudflare/wrangler-action@v4
+        # Pinned to a commit: this step holds the Cloudflare token, and a
+        # mutable tag can be re-pointed at code that reads it. Dependabot's
+        # github-actions ecosystem keeps the SHA current.
+        uses: cloudflare/wrangler-action@ebbaa1584979971c8614a24965b4405ff95890e0 # v4.0.0
         with:
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
