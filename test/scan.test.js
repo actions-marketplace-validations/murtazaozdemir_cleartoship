@@ -540,6 +540,41 @@ test('vendored rules add coverage without duplicating our own', async () => {
   }
 });
 
+test('a NEXT_PUBLIC_ variable named for an AI provider is reported as that provider\'s key', async () => {
+  // Same finding, named for what it is: an OpenAI key in the bundle is a spendable
+  // credential, not just "a secret". A variable with no provider in its name keeps
+  // the generic wording, so the specific title is never guessed.
+  const { mkdtempSync, mkdirSync, writeFileSync } = await import('node:fs');
+  const { tmpdir } = await import('node:os');
+  const dir = mkdtempSync(join(tmpdir(), 'cts-pub-'));
+  mkdirSync(join(dir, 'app'));
+  writeFileSync(
+    join(dir, 'package.json'),
+    JSON.stringify({ name: 't', version: '1.0.0', dependencies: { next: '15.5.24', react: '19.0.0' } }),
+  );
+  writeFileSync(join(dir, '.gitignore'), '.env*\n');
+  writeFileSync(
+    join(dir, '.env.local'),
+    'NEXT_PUBLIC_OPENAI_API_KEY=abc123\nNEXT_PUBLIC_MAPS_SECRET_TOKEN=abc123\n',
+  );
+  writeFileSync(
+    join(dir, 'app', 'page.tsx'),
+    "'use client'\nexport default function P() {\n  return <div>{process.env.NEXT_PUBLIC_OPENAI_API_KEY}{process.env.NEXT_PUBLIC_MAPS_SECRET_TOKEN}</div>;\n}\n",
+  );
+
+  const result = await scan({ root: dir, offline: true });
+  const cts031 = result.findings.filter((f) => f.id === 'CTS031');
+
+  const ai = cts031.find((f) => f.detail.includes('NEXT_PUBLIC_OPENAI_API_KEY'));
+  assert.ok(ai, 'the OpenAI-named variable should be reported');
+  assert.equal(ai.title, 'OpenAI API key exposed through a NEXT_PUBLIC_ variable');
+  assert.equal(ai.meta.llm, 'LLM02:2026 - Sensitive Information Disclosure');
+
+  const generic = cts031.find((f) => f.detail.includes('NEXT_PUBLIC_MAPS_SECRET_TOKEN'));
+  assert.ok(generic, 'the provider-less secret should still be reported');
+  assert.equal(generic.title, 'Server secret exposed through a NEXT_PUBLIC_ variable');
+});
+
 test('a rule whose match opens with a newline is reported on its own line, not the one before', async () => {
   // VG1070 opens with `(?:^|\n)\s*`, so the match starts on the newline that
   // ends the previous line. It used to be reported one line early — here, on

@@ -278,7 +278,7 @@ broadened into **Hidden Context Exposure**.
 | Category | Rules | What we detect |
 | --- | --- | --- |
 | **LLM01** Prompt Injection | 12 + **CTS080** | Caller text interpolated into the instruction text itself; fetched pages and query results reaching a prompt unbounded; instructions hidden in a tool description |
-| **LLM02** Sensitive Information Disclosure | 11 (+ CTS030, CTS045) | Provider keys in client code or a `NEXT_PUBLIC_` variable, `dangerouslyAllowBrowser`, a base URL pointed at somebody else's endpoint |
+| **LLM02** Sensitive Information Disclosure | 8 (+ CTS030, CTS031, CTS045) | Provider keys in client code or a `NEXT_PUBLIC_` variable, `dangerouslyAllowBrowser`, a base URL pointed at somebody else's endpoint |
 | **LLM03** Excessive Agency | 9 + **CTS083** | MCP servers with permissive tool access, `allowedTools` wildcards, auto-approve bypassing the permission prompt, settings hooks that fetch or pipe; and a tool handed to a model whose body takes an action nobody can undo, with no approval step in it |
 | **LLM04** Supply Chain | 1 | MCP server pinned to `@latest` |
 | **LLM06** Unbounded Consumption | **CTS081** | A request-reachable model call with no `max_tokens` ceiling — the answer's length, and its cost, decided by whoever wrote the input |

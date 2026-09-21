@@ -134,6 +134,37 @@ const PUBLIC_BY_DESIGN =
 const SECRETY_NAME = /(SECRET|SERVICE_ROLE|PRIVATE|PASSWORD|PASSWD|_TOKEN|API_KEY|ACCESS_KEY|CREDENTIAL)/;
 
 /**
+ * A `NEXT_PUBLIC_` credential whose name names an LLM or vector-store provider
+ * is not just *a* secret in the bundle — it is a provider key or token, which
+ * `llmCategory` (src/utils/owasp.ts) recognizes by this same provider vocabulary
+ * and files under OWASP LLM02. Without a provider name in the finding text, the
+ * generic wording below never earns that tag even though the finding still
+ * fires — see the README's LLM Top 10 coverage table for why that count matters.
+ */
+const AI_PROVIDER_IN_NAME: [RegExp, string][] = [
+  [/OPENAI/, 'OpenAI'],
+  [/ANTHROPIC/, 'Anthropic'],
+  [/GEMINI/, 'Gemini'],
+  [/CLAUDE/, 'Claude'],
+  [/MISTRAL/, 'Mistral'],
+  [/COHERE/, 'Cohere'],
+  [/HUGGINGFACE/, 'HuggingFace'],
+  [/REPLICATE/, 'Replicate'],
+  [/GROQ/, 'Groq'],
+  [/PERPLEXITY/, 'Perplexity'],
+  [/\bXAI\b/, 'xAI'],
+  [/PINECONE/, 'Pinecone'],
+];
+
+/** The AI/vector provider a `NEXT_PUBLIC_` variable name points at, if any. */
+function aiProviderIn(varName: string): string | null {
+  for (const [pattern, name] of AI_PROVIDER_IN_NAME) {
+    if (pattern.test(varName)) return name;
+  }
+  return null;
+}
+
+/**
  * Matches per rule, per file, that get their own finding. A vendored pattern
  * that hits fifty times in one file is describing the file, not fifty separate
  * problems — but the count is reported rather than dropped.
@@ -369,13 +400,20 @@ export const secretsScanner: Scanner = {
         const key = `${relPath}:${varName}`;
         if (seen.has(key)) continue;
         seen.add(key);
+        const provider = aiProviderIn(varName);
         result.findings.push({
           id: 'CTS031',
           severity: fixtureFile ? 'low' : 'critical',
-          title: 'Server secret exposed through a NEXT_PUBLIC_ variable',
+          title: provider
+            ? `${provider} API key exposed through a NEXT_PUBLIC_ variable`
+            : 'Server secret exposed through a NEXT_PUBLIC_ variable',
           detail:
             `\`${varName}\` is prefixed \`NEXT_PUBLIC_\`, so Next.js inlines its value into the browser ` +
-            'bundle at build time. The name says it holds a secret. Every visitor can read it in devtools.',
+            'bundle at build time. ' +
+            (provider
+              ? `The name says it holds a ${provider} API key or token — every visitor can read it in ` +
+                'devtools and spend your quota or query your data directly.'
+              : 'The name says it holds a secret. Every visitor can read it in devtools.'),
           fix:
             `Rename it to \`${varName.replace('NEXT_PUBLIC_', '')}\`, read it only in server code (Server ` +
             'Actions, Route Handlers, server components), and rotate the current value.',
