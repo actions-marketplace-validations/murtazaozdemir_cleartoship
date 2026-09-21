@@ -3,13 +3,18 @@
 Public backlog. Working notes, positioning and anything about other projects
 live in `NOTES.private.md`, which is gitignored and stays on my machine.
 
-_Current release: **v0.13.5** — tagged, and downloadable from
-[the GitHub release](https://github.com/murtazaozdemir/cleartoship/releases/latest).
+_Current release: **v0.13.6** — the first without the RLS / Server Actions /
+LLM-agent suites, which now live in the private `cleartoship-rules-pro`
+repository. Install from
+[cleartoship.app](https://cleartoship.app/cleartoship.mjs)
+(`curl -fsSL https://cleartoship.app/cleartoship.mjs -o cleartoship.mjs && node cleartoship.mjs`);
+the same file is on [the GitHub release](https://github.com/murtazaozdemir/cleartoship/releases/latest).
 **Not on npm.** The package was unpublished from npmjs.com on 2026-09-03 and the
-`NPM_TOKEN` secret has returned 401 since, so `npx cleartoship` does not resolve;
-`releases/latest/download/cleartoship-standalone.tgz` is the working install
-path until that is sorted. Writing this down rather than leaving the line
-saying "npm `latest`", which it did, and which was not true._
+`NPM_TOKEN` secret has returned 401 since, so `npx cleartoship` does not resolve.
+`deploy-site.yml` serves the release's standalone build from the domain and
+compares its hash with the release asset after every deploy. The `cleartoship`
+name on npm is currently unclaimed. Writing this down rather than leaving the
+line saying "npm `latest`", which it did, and which was not true._
 _v0.13.0 and earlier published **unsigned** — npm's registry refuses provenance
 from a private source repo. The repository is public now, and `release.yml`
 reads its visibility, so 0.13.1 is the first release signed with provenance._

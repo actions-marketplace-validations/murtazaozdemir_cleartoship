@@ -30,21 +30,22 @@ Those six, and the RLS and Server Actions suites alongside them, are **Pro** —
 secrets, logging/exception handling) is free, forever, no account.
 
 ```bash
-npx cleartoship
+curl -fsSL https://cleartoship.app/cleartoship.mjs -o cleartoship.mjs
+node cleartoship.mjs
 ```
 
 **Free tier costs nothing, no account, no key.** It runs on your machine and
 reports to your terminal — nothing leaves it either way.
 
-Or with no package manager in the path at all — one bundled file, zero
-dependencies, nothing for a registry to resolve:
+That is one bundled file with zero dependencies: no package manager in the path
+and nothing for a registry to resolve. `npx cleartoship` does **not** work right
+now — the package is not on npm. The same file is attached to every
+[GitHub release](https://github.com/murtazaozdemir/cleartoship/releases/latest)
+if you would rather not fetch it from this domain
+(`https://github.com/murtazaozdemir/cleartoship/releases/latest/download/cleartoship.mjs`),
+and `https://cleartoship.app/SHA256SUMS` lists its checksum.
 
-```bash
-curl -fsSL https://github.com/murtazaozdemir/cleartoship/releases/latest/download/cleartoship.mjs -o cleartoship.mjs
-node cleartoship.mjs
-```
-
-That second one is the most robust way to run this, and deliberately so: npm 12
+This is the most robust way to run it, and deliberately so: npm 12
 ships with `allow-remote` and `allow-git` set to `none`, so *any* install from a
 URL or a git ref now needs an explicit flag from the user. A file you fetch and
 hand to `node` needs nothing to cooperate.
@@ -56,14 +57,16 @@ rather than approximated, since a looser `>=22.18` would claim Node 23 and early
 <details>
 <summary>Why there are three install paths</summary>
 
-`npx cleartoship` is the normal one. Two others exist so that a registry or
-account problem cannot take the tool offline — which is not hypothetical:
+`npx cleartoship` is the usual one once the package is on npm — it is not right
+now. Two others exist so that a registry or account problem cannot take the tool
+offline, which is not hypothetical:
 
 Ranked by how little has to work for them to work:
 
 ```bash
 # 1. nothing but node. No package manager, no registry, no install step.
-curl -fsSL https://github.com/murtazaozdemir/cleartoship/releases/latest/download/cleartoship.mjs -o cleartoship.mjs
+#    (The same file is at https://github.com/murtazaozdemir/cleartoship/releases/latest/download/cleartoship.mjs)
+curl -fsSL https://cleartoship.app/cleartoship.mjs -o cleartoship.mjs
 node cleartoship.mjs
 
 # 2. the same bundle as an installable package. npm 12 defaults allow-remote to
