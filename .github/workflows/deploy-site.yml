@@ -69,8 +69,7 @@ jobs:
       # Fetched from the GitHub Release at deploy time rather than committed, and
       # ONLY when a release exists for the exact version this commit declares.
       # Serving "whatever is latest" would hand out a build that does not match
-      # this source — v0.13.5 still contains the rules that moved to the private
-      # Pro package. With no matching release the site simply deploys without the
+      # this source. With no matching release the site simply deploys without the
       # files, and release.yml redeploys once the release exists.
       - name: Fetch this version's standalone build into the site
         id: dist

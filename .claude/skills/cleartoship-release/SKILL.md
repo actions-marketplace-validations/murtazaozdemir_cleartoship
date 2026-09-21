@@ -61,8 +61,8 @@ registry to publish.
 Inside the job the order is deliberate: create the GitHub Release, verify it
 carries a bundle that runs and reports this version, then dispatch a site
 redeploy. `deploy-site.yml` fetches the release for the exact version in
-`package.json` — never "latest", because `v0.13.5` still contains rules that
-moved to the private Pro package — and compares the served file's hash with the
+`package.json` — never "latest", so the download always matches the source that
+deployed it — and compares the served file's hash with the
 release asset. With no matching release the site simply deploys without the
 download files.
 
