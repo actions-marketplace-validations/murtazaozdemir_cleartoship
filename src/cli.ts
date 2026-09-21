@@ -81,8 +81,8 @@ async function dispatchPro(sub: 'login' | 'status' | 'logout', args: string[]): 
   } catch {
     process.stderr.write(
       pc.red(
-        'cleartoship-rules-pro is not installed. Run `npm install cleartoship-rules-pro` ' +
-          'to activate the RLS, Server Actions and LLM/agent suites.\n',
+        'The Pro rule suites (RLS, Server Actions, LLM/agent) are not available yet — ' +
+          'there is nothing to install or buy today. See https://cleartoship.app/pricing\n',
       ),
     );
     process.exitCode = 1;

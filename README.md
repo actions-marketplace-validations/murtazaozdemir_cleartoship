@@ -98,21 +98,14 @@ rules below, plus the full vendored community ruleset — free forever, no
 account, no key.
 
 The **RLS suite**, the **Server Actions suite**, and the **LLM/agent suite** —
-marked 🔒 **Pro** in the tables below — live in a separate package,
-[`cleartoship-rules-pro`](https://www.npmjs.com/package/cleartoship-rules-pro),
-and only run with a valid license:
-
-```bash
-npm install cleartoship-rules-pro
-cleartoship pro login <your-license-key>
-npx cleartoship   # now includes the RLS, Server Actions and LLM/agent suites
-```
-
-`cleartoship pro status` shows your plan and expiry; `cleartoship pro logout`
-clears a locally-stored key (an active `CLEARTOSHIP_LICENSE_KEY` env var — the
-way CI should supply one — always wins over the stored key and isn't affected
-by `logout`). Verification works fully offline (a signed token, checked
-locally), with a periodic best-effort online check for revocation — a flaky
+marked 🔒 **Pro** in the tables below — are a separate, proprietary package,
+`cleartoship-rules-pro`, that **is not available yet**. It is not on npm and
+there is nothing to buy or install today (see
+[Pricing](https://cleartoship.app/pricing)). It is deliberately unpublished, so
+treat anything you find on the registry under that name as **not from this
+project**. When it launches it will add those suites to the same report and run
+only with a valid license, verified fully offline (a signed token, checked
+locally) with a periodic best-effort online check for revocation — a flaky
 network never blocks a scan you've already paid for.
 
 Without `cleartoship-rules-pro` installed and licensed, those three suites
