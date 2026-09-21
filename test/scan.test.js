@@ -476,6 +476,91 @@ test('install commands in prose are resolved like manifest dependencies', async 
   assert.ok(!found.some((n) => n.includes('-D')), 'flags are not packages');
 });
 
+test('what follows an install command is its arguments, not the prose around it', async () => {
+  // Each shape below produced false criticals ("dependency does not exist") when this
+  // rule was run over 154 real repositories: 117 of its 125 findings came from prose,
+  // and 55 were not package names at all.
+  const { collectProseForTest } = await import('../dist/scanners/dependencies.js');
+  const names = (src) => collectProseForTest(src, 'README.md').map((d) => `${d.ecosystem}:${d.name}`);
+
+  // A line that is only `npm install` must not swallow the NEXT line as arguments.
+  assert.deepEqual(names('```bash\nnpm install\n\nfunded packages are looking for you\n```'), []);
+  assert.deepEqual(names('```diff\n# Install dependencies\npnpm i\n\nvariables. Then start the app\n```'), []);
+
+  // `-r requirements.txt` installs what the file lists; it is not a package.
+  assert.deepEqual(names('```bash\npip install -r requirements.txt\n```'), []);
+  assert.deepEqual(names('```bash\npip install -r requirements.txt requests\n```'), ['pypi:requests']);
+  assert.deepEqual(names('```bash\nnpm install --prefix ./web left-pad\n```'), ['npm:left-pad']);
+
+  // A sentence that mentions the command names no package...
+  assert.deepEqual(names('You can run npm install to install all the dependencies.'), []);
+  assert.deepEqual(names('Jalankan npm install dulu, tidak butuh apa-apa lagi.'), []);
+  // ...but the same command written as a command still counts, in each of the ways
+  // people actually write one.
+  assert.deepEqual(names('Run `npm install left-pad` first.'), ['npm:left-pad']);
+  assert.deepEqual(names('Run `cd app && npm install left-pad` first.'), ['npm:left-pad']);
+  assert.deepEqual(names('$ npm install left-pad'), ['npm:left-pad']);
+  assert.deepEqual(names('- npm install left-pad'), ['npm:left-pad']);
+  assert.deepEqual(names('```bash\ncd app && npm install left-pad\n```'), ['npm:left-pad']);
+
+  // Sentence punctuation is not part of a name; file names are not packages.
+  assert.deepEqual(names('```\nnpm install left-pad.\n```'), ['npm:left-pad']);
+  assert.deepEqual(names('```\nnpm install package.json\n```'), []);
+
+  // A trailing comment is a comment: none of these words is a package.
+  assert.deepEqual(names('```\npip install -r requirements.txt  # includes openai, supervision\n```'), []);
+  assert.deepEqual(names('```\nnpm install bullmq   # Durable webhook queue with dead-letter list\n```'), ['npm:bullmq']);
+  assert.deepEqual(names('```\n$ npm install --package-lock-only   # #548\'s manifest, unmodified\n```'), []);
+  assert.deepEqual(names('```\npip install -e ".[dev]"  # or: uv sync\n```'), []);
+  // The list ends where the sentence does.
+  assert.deepEqual(names('```\npip install numpy. CMD [python, app.py]\n```'), ['pypi:numpy']);
+
+  // A document's stand-in for "a package of yours" is not a hallucination...
+  assert.deepEqual(
+    names('```\nnpm install @your-org/validation-system @example/cli @company/design-system example-api package1\n```'),
+    [],
+  );
+  // ...an environment variable is not a package...
+  assert.deepEqual(names('```\npip install LINEAR_API_KEY secrets.LINEAR_API_KEY\n```'), []);
+  // ...and a name that merely starts like a placeholder still counts.
+  assert.deepEqual(names('```\nnpm install exampleish-real-thing @acmeforge/toolkit\n```'), ['npm:exampleish-real-thing', 'npm:@acmeforge/toolkit']);
+
+  // `\r`-only line endings (old Mac files) must not turn a whole document into one line.
+  assert.deepEqual(names('```bash\rnpm install\rfunded packages are looking for you\r```'), []);
+  assert.deepEqual(names('```bash\rnpm install left-pad\r```'), ['npm:left-pad']);
+});
+
+test('an extras group in pyproject.toml is not a dependency', async () => {
+  const { collectPyprojectForTest } = await import('../dist/scanners/dependencies.js');
+  const toml = [
+    '[project]',
+    'name = "demo"',
+    'dependencies = [',
+    '    "click>=8.0",',
+    ']',
+    '',
+    '[project.optional-dependencies]',
+    'dev = [',
+    '    "ruff>=0.11",',
+    '    "pytest>=8.0",',
+    ']',
+    '',
+    '[tool.poetry.dependencies]',
+    'python = "^3.11"',
+    'requests = "^2.28"',
+  ].join('\n');
+  const names = collectPyprojectForTest(toml, 'pyproject.toml').map((d) => d.name).sort();
+  assert.deepEqual(names, ['click', 'pytest', 'requests', 'ruff']);
+  assert.ok(!names.includes('dev'), '`dev` names a group of extras, not a package');
+
+  // Once the dependencies array is closed, the keys under it are project metadata.
+  const meta = collectPyprojectForTest(
+    ['[project]', 'name = "demo"', 'dependencies = [', '    "click>=8.0",', ']', 'requires-python = ">=3.11"', 'readme = "README.md"'].join('\n'),
+    'pyproject.toml',
+  ).map((d) => d.name);
+  assert.deepEqual(meta, ['click'], '`requires-python` and `readme` are not dependencies');
+});
+
 test('quoted or commented mentions of a risky flag are not findings', async () => {
   const result = await scan({ root: CLEAN, offline: true });
   assert.ok(!result.findings.some((f) => f.id === 'CTS045'));
@@ -1267,4 +1352,69 @@ test('the zero-dependency bundle behaves exactly like the package it stands in f
   const manifest = JSON.parse(readFileSync(join(root, 'standalone', 'package.json'), 'utf8'));
   assert.deepEqual(manifest.dependencies, {}, 'the standalone package declares no dependencies');
   assert.equal(manifest.version, JSON.parse(readFileSync(join(root, 'package.json'), 'utf8')).version);
+});
+
+test('a client component that only mentions a server secret by name does not read it', async () => {
+  // Sampled from a real repository: `alert('Stripe not configured yet. Add
+  // STRIPE_SECRET_KEY to enable.')` — a message naming the variable — was a critical
+  // "client component reads a server-only secret". A read in code still is one, whether
+  // written as a property or as a bracket access.
+  const root = await tempProject({
+    'package.json': JSON.stringify({ name: 'x', version: '1.0.0', dependencies: { next: '15.5.24', react: '19.0.0' } }),
+    'app/message.tsx': "'use client'\nexport default function P() {\n  alert('Stripe not configured yet. Add STRIPE_SECRET_KEY to enable.')\n  return null\n}\n",
+    'app/comment.tsx': "'use client'\n// TODO: move STRIPE_SECRET_KEY handling to the server\nexport default function P() { return null }\n",
+    'app/property.tsx': "'use client'\nconst k = process.env.STRIPE_SECRET_KEY\nexport default function P() { return k }\n",
+    'app/bracket.tsx': "'use client'\nconst k = process.env['SUPABASE_SERVICE_ROLE_KEY']\nexport default function P() { return k }\n",
+  });
+  const result = await scan({ root, offline: true, noCommunity: true });
+  const flagged = result.findings.filter((f) => f.id === 'CTS033').map((f) => f.file).sort();
+  assert.deepEqual(flagged, ['app/bracket.tsx', 'app/property.tsx']);
+});
+
+test('a NEXT_PUBLIC_ key that its vendor documents as public is not a leaked secret', async () => {
+  // About half the NEXT_PUBLIC_ findings on 154 real repos were analytics and maps keys
+  // that are designed to ship in the browser. A name that is not on that list is still
+  // reported, so this cannot quietly become "ignore every NEXT_PUBLIC_ variable".
+  const names = [
+    'NEXT_PUBLIC_POSTHOG_PROJECT_TOKEN', 'NEXT_PUBLIC_POSTHOG_API_KEY', 'NEXT_PUBLIC_MAPBOX_API_TOKEN',
+    'NEXT_PUBLIC_GOOGLE_MAPS_API_KEY', 'NEXT_PUBLIC_MIXPANEL_TOKEN', 'NEXT_PUBLIC_RECAPTCHA_SITE_KEY',
+  ];
+  const secretive = ['NEXT_PUBLIC_NOTION_TOKEN', 'NEXT_PUBLIC_XRPL_SENIOR_SECRET'];
+  const all = [...names, ...secretive];
+  const root = await tempProject({
+    'package.json': JSON.stringify({ name: 'x', version: '1.0.0', dependencies: { next: '15.5.24', react: '19.0.0' } }),
+    '.gitignore': '.env*\n',
+    '.env.local': all.map((n) => `${n}=abc123`).join('\n') + '\n',
+    'app/page.tsx': `'use client'\nexport default function P() {\n  return <div>${all.map((n) => `{process.env.${n}}`).join('')}</div>\n}\n`,
+  });
+  const result = await scan({ root, offline: true, noCommunity: true });
+  // One finding per file that carries the name (the .env line and the code reading it).
+  const flagged = [...new Set(
+    result.findings.filter((f) => f.id === 'CTS031').map((f) => /`(NEXT_PUBLIC_[A-Z0-9_]+)`/.exec(f.detail)[1]),
+  )].sort();
+  assert.deepEqual(flagged, secretive.slice().sort());
+});
+
+test('a database connection string is a leak only when it could reach a real database', async () => {
+  // Of 96 critical PostgreSQL-connection-string findings on 154 real repositories, 63 were
+  // a default password on localhost, 18 were template passwords and 10 were local dev
+  // databases; five, in two repositories, were a real password to a remote host. The credential-shaped
+  // strings are assembled at run time so this file does not itself contain one.
+  const url = (user, password, host) => ['postgres', '://', user, ':', password, '@', host, ':5432/app'].join('');
+  const root = await tempProject({
+    'package.json': JSON.stringify({ name: 'x', version: '1.0.0' }),
+    // default / template passwords: nothing to leak, wherever they point
+    'docker-compose.yml': `services:\n  db:\n    environment:\n      DATABASE_URL: ${url('postgres', 'postgres', 'localhost')}\n`,
+    'notes/template.yml': `url: ${url('app', 'mysecretpassword', 'db.internal.example')}\n`,
+    // a real-looking password to a local database: a development credential, reported low
+    'config/dev.yml': `url: ${url('app', 'Tr0ub4dor-9xQ', 'localhost')}\n`,
+    // a real-looking password to a remote host: the actual finding
+    'ops/deploy.sh': `DATABASE_URL=${url('admin', 'Zx9kQ2mV7pLwHt', 'prod-db.abc123.us-east-1.rds.amazonaws.com')}\n`,
+  });
+  const result = await scan({ root, offline: true, noCommunity: true });
+  const found = result.findings
+    .filter((f) => f.id === 'CTS030' && f.meta.kind === 'postgres-url')
+    .map((f) => `${f.file} ${f.severity}`)
+    .sort();
+  assert.deepEqual(found, ['config/dev.yml low', 'ops/deploy.sh critical']);
 });

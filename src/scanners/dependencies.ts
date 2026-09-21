@@ -78,16 +78,28 @@ function collectFromPyproject(source: string, relPath: string): Declared[] {
   const out: Declared[] = [];
   const lines = source.split('\n');
   let inDeps = false;
+  let inlineArray = false; // opened by `dependencies = [` inside [project]
   lines.forEach((raw, i) => {
     const line = raw.trim();
     if (/^\[/.test(line)) {
       inDeps = /\[(tool\.poetry\.(dev-)?dependencies|project\.optional-dependencies)\]/.test(line);
+      inlineArray = false;
       return;
     }
-    if (/^dependencies\s*=\s*\[/.test(line)) inDeps = true;
+    if (/^dependencies\s*=\s*\[/.test(line)) {
+      inDeps = true;
+      inlineArray = true;
+    } else if (inlineArray && /^\]/.test(line)) {
+      // The array is closed; `requires-python = ">=3.11"` below it is not a dependency.
+      inDeps = false;
+      inlineArray = false;
+      return;
+    }
     if (!inDeps) return;
     const quoted = /^["']([A-Za-z0-9][A-Za-z0-9._-]*)/.exec(line.replace(/^\s*["']?/, (m0) => m0));
-    const poetry = /^([A-Za-z0-9][A-Za-z0-9._-]*)\s*=/.exec(line);
+    // `dev = [` under [project.optional-dependencies] names an extras group; its
+    // packages are the strings inside. A poetry dependency's value is never a list.
+    const poetry = /^([A-Za-z0-9][A-Za-z0-9._-]*)\s*=(?!\s*\[)/.exec(line);
     const strItem = /["']([A-Za-z0-9][A-Za-z0-9._-]*)\s*[<>=!~ ]*[^"']*["']/.exec(line);
     const name = poetry?.[1] ?? strItem?.[1] ?? quoted?.[1];
     if (!name || name === 'python') return;
@@ -155,38 +167,109 @@ function privateScopes(root: string): Set<string> {
 /** Valid npm package name, optionally scoped. */
 const NPM_NAME = String.raw`(?:@[a-z0-9-~][a-z0-9-._~]*\/)?[a-z0-9-~][a-z0-9-._~]*`;
 
+// Spaces and tabs only between a command and its arguments — never `\s`, which also
+// matches a newline. `\s+` let a line that was just `npm install` swallow the next
+// line of prose as its argument list, so a README's following sentence became a
+// list of "packages" (`funded`, `variables.`, `sure.`, ...).
 const INSTALL_COMMAND = new RegExp(
-  String.raw`\b(?:npm\s+(?:i|install|add)|yarn\s+add|pnpm\s+(?:i|install|add)|bun\s+(?:i|install|add))\s+([^\n\`|;&>]+)`,
+  String.raw`\b(?:npm[ \t]+(?:i|install|add)|yarn[ \t]+add|pnpm[ \t]+(?:i|install|add)|bun[ \t]+(?:i|install|add))[ \t]+([^\n\`|;&>]+)`,
   'gi',
 );
 const RUNNER_COMMAND = new RegExp(
-  String.raw`\b(?:npx|pnpm\s+dlx|bunx)\s+([^\n\`|;&>]+)`,
+  String.raw`\b(?:npx|pnpm[ \t]+dlx|bunx)[ \t]+([^\n\`|;&>]+)`,
   'gi',
 );
 const PIP_COMMAND =
-  /\b(?:pip3?\s+install|uv\s+pip\s+install|poetry\s+add|uv\s+add)\s+([^\n`|;&>]+)/gi;
+  /\b(?:pip3?[ \t]+install|uv[ \t]+pip[ \t]+install|poetry[ \t]+add|uv[ \t]+add)[ \t]+([^\n`|;&>]+)/gi;
+
+/**
+ * Flags whose *next* argument is a value, not a package: `pip install -r
+ * requirements.txt` installs what that file lists, it does not install a package
+ * named `requirements.txt` (which was reported as a hallucinated dependency, twelve
+ * times over, on one batch of real repositories).
+ */
+const FLAGS_WITH_VALUE = new Set([
+  '-r', '--requirement', '-c', '--constraint', '-e', '--editable', '-i', '--index-url',
+  '--extra-index-url', '-f', '--find-links', '-t', '--target', '--prefix', '--root',
+  '--registry', '-w', '--workspace', '--tag', '--python', '--python-version', '--platform',
+  '--cache', '--cache-dir', '--scope', '--otp', '--userconfig', '--loglevel', '-C', '--dir',
+]);
+
+/** Bare tokens that are file names, not packages. */
+const FILE_LIKE = /\.(txt|json|toml|lock|cfg|ini|ya?ml|md|lockb?)$/i;
+
+/**
+ * Names a document uses to stand for "a package of yours": `@your-org/pkg`,
+ * `@example/cli`, `package1`. A registry has never heard of them, and it is not
+ * supposed to — reporting them as hallucinated dependencies was noise, not a catch.
+ */
+const PLACEHOLDER_NAME =
+  /^(?:@(?:your[-_]?(?:org|company|scope|team|username)|my[-_]?(?:org|company|scope|team)|example|sample|acme|company|org|scope|username|user)\/.+|(?:example|sample|foo|bar|baz|acme)(?:-[a-z0-9-]+)?|(?:package|pkg|module|library)\d+|your[-_]package(?:[-_]name)?|my[-_](?:package|app|lib|library|project|tool|cli))$/i;
+
+/** `LINEAR_API_KEY`, `secrets.LINEAR_API_KEY`: an environment variable, never a package. */
+const ENV_VAR_LIKE = /[A-Z0-9]+_[A-Z0-9_]+/;
+
+/**
+ * Whether the command at `index` is written *as a command* — in a fenced block, in
+ * inline code, or at the start of a line — rather than mentioned in a sentence.
+ * "Run npm install to install dependencies" names no package, and reading the words
+ * after `install` as packages is how prose produced criticals.
+ */
+function isWrittenAsCommand(source: string, index: number, fences: number[]): boolean {
+  let open = 0;
+  for (const f of fences) if (f < index) open++;
+  if (open % 2 === 1) return true; // inside a fenced code block
+  const lineStart = source.lastIndexOf('\n', index - 1) + 1;
+  const before = source.slice(lineStart, index);
+  if (((before.match(/`/g) ?? []).length) % 2 === 1) return true; // inside an inline code span
+  return /^\s*(?:[$>#%]\s*|(?:[-*+]|\d+[.)])\s+)?(?:sudo\s+)?(?:RUN\s+)?$/.test(before);
+}
 
 /**
  * Pulls package names out of install commands written in prose. Agent
  * instruction files and READMEs are where a hallucinated name is copy-pasted
  * from long before anyone adds it to a manifest, so they are worth reading.
  */
-function collectFromProse(source: string, relPath: string): Declared[] {
+function collectFromProse(rawSource: string, relPath: string): Declared[] {
+  // Old-Mac (`\r`-only) line endings would otherwise make a whole document one line,
+  // so "start of a line" and "inside a fence" would mean nothing.
+  const source = rawSource.replace(/\r\n?/g, '\n');
   const out: Declared[] = [];
   const npmName = new RegExp(`^${NPM_NAME}$`);
+
+  const fences: number[] = [];
+  for (const f of source.matchAll(/^[ \t]*(?:```|~~~)/gm)) fences.push(f.index!);
 
   const harvest = (re: RegExp, ecosystem: 'npm' | 'pypi', firstArgOnly: boolean) => {
     re.lastIndex = 0;
     let m: RegExpExecArray | null;
     while ((m = re.exec(source)) !== null) {
-      const args = m[1]!.trim().split(/\s+/);
+      if (!isWrittenAsCommand(source, m.index, fences)) continue;
+      // What follows a `#` is a comment: `pip install -r requirements.txt  # includes
+      // openai, supervision` is not an instruction to install `includes`.
+      const argText = m[1]!.split(/(?:^|[ \t])#/)[0]!.trim();
+      if (!argText) continue;
+      // The list ends where the sentence does. `pip install numpy. CMD [...]` names one
+      // package, not `CMD` as well.
+      const args: string[] = [];
+      for (const token of argText.split(/\s+/)) {
+        args.push(token);
+        if (/[.;!?]$/.test(token)) break;
+      }
       const line = lineAt(source, m.index);
-      for (const arg of args) {
-        if (arg.startsWith('-')) continue; // flag
+      let skipNext = false;
+      for (const raw of args) {
+        if (skipNext) { skipNext = false; continue; } // the value of the previous flag
+        if (raw.startsWith('-')) {
+          if (!raw.includes('=') && FLAGS_WITH_VALUE.has(raw)) skipNext = true;
+          continue; // flag
+        }
+        const arg = raw.replace(/[.,;:!?)]+$/, ''); // sentence punctuation, not part of a name
         // Strip a version spec, but not a scope: `@types/node` vs `react@18`.
         const bare = arg.replace(/(?!^)@[^@/]*$/, '').replace(/\[.*\]$/, '');
         if (!bare || bare.includes('/') && !bare.startsWith('@')) continue; // path or URL
-        if (/^[.~/]|:/.test(bare)) continue;
+        if (/^[.~/]|:/.test(bare) || FILE_LIKE.test(bare)) continue;
+        if (PLACEHOLDER_NAME.test(bare) || ENV_VAR_LIKE.test(bare)) continue;
         const ok = ecosystem === 'npm' ? npmName.test(bare) : /^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(bare);
         // A real package name contains letters; reject list bullets, ports and
         // version-ish tokens ("3003", "1.", "2") that show up in prose.
@@ -766,3 +849,6 @@ export const dependencyScanner: Scanner = {
 
 /** Exposed for tests: harvest package names from prose install commands. */
 export const collectProseForTest = collectFromProse;
+
+/** Exposed for tests: harvest package names from a pyproject.toml. */
+export const collectPyprojectForTest = collectFromPyproject;

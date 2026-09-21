@@ -87,3 +87,168 @@ test('webhook that verifies via a framework helper or sig header is not flagged'
     'a webhook that reads the signature header + verifies must not be flagged',
   );
 });
+
+test('a route named for a provider is only an unverified webhook if nothing else identifies the caller', async () => {
+  // Five of six CTS042 findings sampled from real repositories were ordinary
+  // authenticated endpoints whose PATH mentioned `stripe` or `webhook`: a checkout
+  // creator behind getUser(), a reconcile cron behind CRON_SECRET, a notifier behind a
+  // session, a route delegating to its own per-provider verifier. Only the receiver
+  // that trusts an unauthenticated body is the finding.
+  const { mkdtempSync, mkdirSync, writeFileSync } = await import('node:fs');
+  const { tmpdir } = await import('node:os');
+  const dir = mkdtempSync(join(tmpdir(), 'cts-webhook-'));
+  writeFileSync(
+    join(dir, 'package.json'),
+    JSON.stringify({ name: 'x', version: '1.0.0', dependencies: { next: '15.5.24', react: '19.0.0' } }),
+  );
+  const route = (path, body) => {
+    mkdirSync(join(dir, 'app', 'api', path), { recursive: true });
+    writeFileSync(join(dir, 'app', 'api', path, 'route.ts'), body);
+  };
+  route('stripe/create-checkout', [
+    "import { createClient } from '@/lib/supabase/server';",
+    'export async function POST(request: Request) {',
+    '  const supabase = await createClient();',
+    '  const { data: { user } } = await supabase.auth.getUser();',
+    "  if (!user) return Response.json({ error: 'Unauthorized' }, { status: 401 });",
+    '  return Response.json({ url: "https://checkout.example/session" });',
+    '}',
+  ].join('\n'));
+  route('cron/stripe-reconcile', [
+    'export async function POST(request: Request) {',
+    '  const authorization = request.headers.get("authorization");',
+    '  if (authorization !== `Bearer ${process.env.CRON_SECRET}`) return new Response("no", { status: 401 });',
+    '  return Response.json({ ok: true });',
+    '}',
+  ].join('\n'));
+  route('webhooks/[provider]', [
+    "import { verifyProviderWebhook } from '@/lib/webhooks';",
+    'export async function POST(request: Request) {',
+    '  const rawBody = await request.text();',
+    '  await verifyProviderWebhook(rawBody, request);',
+    '  return Response.json({ received: true });',
+    '}',
+  ].join('\n'));
+  route('cron/stripe-typed-env', [
+    "import { env } from '@/lib/env';",
+    'export async function POST(request: Request) {',
+    '  const cronSecret = env.CRON_SECRET;',
+    '  if (request.headers.get("authorization") !== `Bearer ${cronSecret}`) return new Response("no", { status: 401 });',
+    '  return Response.json({ ok: true });',
+    '}',
+  ].join('\n'));
+  route('webhooks/custom-provider', [
+    'export async function POST(request: Request) {',
+    '  const rawBody = await request.text();',
+    '  const header = PROVIDER_HEADERS[new URL(request.url).pathname] ?? "x-webhook-signature";',
+    '  const signature = request.headers.get(header) ?? "";',
+    '  return Response.json(await handleProviderWebhook(rawBody, signature));',
+    '}',
+  ].join('\n'));
+  route('webhooks/gmail', [
+    'export async function POST(req: Request) {',
+    '  const body = await req.json();',
+    '  await enqueue(body);',
+    '  return Response.json({ received: true });',
+    '}',
+  ].join('\n'));
+
+  const result = await scan({ root: dir, offline: true, noCommunity: true });
+  const flagged = result.findings.filter((f) => f.id === 'CTS042').map((f) => f.file).sort();
+  assert.deepEqual(flagged, ['app/api/webhooks/gmail/route.ts'], 'only the receiver that verifies nothing is unverified');
+});
+
+test('a helper that checks a credential header against a server-side secret authenticates its callers', async () => {
+  // Sampled from a real repository: a route calls `authenticateApiRequest(request)`,
+  // imported through the `@/` alias, and that helper compares the Authorization header
+  // with a secret from the environment. That IS authentication, and the route was
+  // reported as missing it because the helper resolver only looked at callee names.
+  const { mkdtempSync, mkdirSync, writeFileSync } = await import('node:fs');
+  const { tmpdir } = await import('node:os');
+  const dir = mkdtempSync(join(tmpdir(), 'cts-helper-'));
+  const put = (rel, body) => {
+    const full = join(dir, rel);
+    mkdirSync(join(full, '..'), { recursive: true });
+    writeFileSync(full, body);
+  };
+  put('package.json', JSON.stringify({ name: 'x', version: '1.0.0', dependencies: { next: '15.5.24', react: '19.0.0', '@supabase/supabase-js': '2.0.0' } }));
+  put('tsconfig.json', JSON.stringify({ compilerOptions: { baseUrl: '.', paths: { '@/*': ['./*'] } } }));
+  // Authenticates: reads the credential header AND a secret from the environment.
+  put('lib/api-auth.ts', [
+    'export async function authenticateApiRequest(request: Request) {',
+    '  const expected = process.env.API_KEY;',
+    "  const header = request.headers.get('authorization');",
+    '  if (!expected || header !== `Bearer ${expected}`) throw new Error("Unauthorized");',
+    '  return { id: "service" };',
+    '}',
+  ].join('\n'));
+  // Does NOT authenticate: reads a header, compares it to nothing secret.
+  put('lib/read-header.ts', [
+    'export async function readCaller(request: Request) {',
+    "  return request.headers.get('authorization');",
+    '}',
+  ].join('\n'));
+  const insertRoute = (call, importLine) => [
+    "import { createClient } from '@supabase/supabase-js';",
+    importLine,
+    'const db = createClient(process.env.URL!, process.env.ANON!);',
+    'export async function POST(request: Request) {',
+    `  ${call}`,
+    "  await db.from('seasons').insert(await request.json());",
+    '  return Response.json({ ok: true });',
+    '}',
+  ].join('\n');
+  put('app/api/guarded/route.ts', insertRoute('await authenticateApiRequest(request);', "import { authenticateApiRequest } from '@/lib/api-auth';"));
+  put('app/api/bare/route.ts', insertRoute('', ''));
+  put('app/api/header-only/route.ts', insertRoute('await readCaller(request);', "import { readCaller } from '@/lib/read-header';"));
+
+  const result = await scan({ root: dir, offline: true, noCommunity: true });
+  const flagged = result.findings.filter((f) => f.id === 'CTS001').map((f) => f.file).sort();
+  assert.deepEqual(
+    flagged,
+    ['app/api/bare/route.ts', 'app/api/header-only/route.ts'],
+    'the route calling the shared-secret helper is authenticated; the other two are not',
+  );
+});
+
+test('a handler that does nothing but answer with a constant has nothing to protect, on any method', async () => {
+  // Sampled from a real repository: a health check whose `PUT` handler returns a constant
+  // and a timestamp was reported "missing authorization" because PUT is assumed to write.
+  // Handlers that DO something — read the caller's input, or call anything — stay findings.
+  const { mkdtempSync, mkdirSync, writeFileSync } = await import('node:fs');
+  const { tmpdir } = await import('node:os');
+  const dir = mkdtempSync(join(tmpdir(), 'cts-constant-'));
+  writeFileSync(
+    join(dir, 'package.json'),
+    JSON.stringify({ name: 'x', version: '1.0.0', dependencies: { next: '15.5.24', react: '19.0.0' } }),
+  );
+  const route = (path, body) => {
+    mkdirSync(join(dir, 'app', 'api', path), { recursive: true });
+    writeFileSync(join(dir, 'app', 'api', path, 'route.ts'), body);
+  };
+  route('health', [
+    "import { NextResponse } from 'next/server';",
+    'export async function GET() { return NextResponse.json({ ok: true }); }',
+    'export async function PUT() {',
+    "  return NextResponse.json({ ok: true, method: 'PUT', timestamp: new Date().toISOString() });",
+    '}',
+  ].join('\n'));
+  route('does-work', [
+    "import { NextResponse } from 'next/server';",
+    'export async function PUT() {',
+    '  await rebuildEverything();',
+    '  return NextResponse.json({ ok: true });',
+    '}',
+  ].join('\n'));
+  route('reads-input', [
+    "import { NextResponse } from 'next/server';",
+    'export async function POST(request: Request) {',
+    '  const body = await request.json();',
+    '  return NextResponse.json({ echoed: body });',
+    '}',
+  ].join('\n'));
+
+  const result = await scan({ root: dir, offline: true, noCommunity: true });
+  const flagged = result.findings.filter((f) => f.id === 'CTS001').map((f) => f.file).sort();
+  assert.deepEqual(flagged, ['app/api/does-work/route.ts', 'app/api/reads-input/route.ts']);
+});

@@ -3,7 +3,7 @@ import {
   parseSource, calleeName, calleeTail, hasDirective,
   traverse, buildModuleIndex, Suppressions, emptyResult,
 } from '../internal.js';
-import { authNamesFor } from './auth-helpers.js';
+import { authNamesFor, CREDENTIAL_HEADERS, SECRET_ENV } from './auth-helpers.js';
 import type { Finding, ProjectContext, ScanResult, Scanner } from '../internal.js';
 
 /**
@@ -68,6 +68,15 @@ const SIGNATURE_CHECKS = [
 ];
 
 /**
+ * A callee *named* like a signature check — `verifyProviderWebhook`,
+ * `isValidSignature`, `checkHmac` — verifies a signature whatever it is called from.
+ * A route that delegates to its own per-provider verifier is not an unverified
+ * webhook, and the fixed list above can never enumerate every such name.
+ */
+const SIGNATURE_VERIFY_NAME =
+  /(?=.*(?:signature|hmac|webhook))(?=.*(?:verif|valid|check|authent|assert|construct))/i;
+
+/**
  * Request headers that only exist to carry a webhook signature. A handler that
  * reads one is participating in signature verification — a route that genuinely
  * forgot it would not reference the header at all — so reading one clears the
@@ -81,11 +90,8 @@ const SIGNATURE_HEADERS =
  * it against a server-side secret is how a cron or machine-to-machine endpoint
  * authenticates — there is no session to look up.
  */
-const CREDENTIAL_HEADERS =
-  /^(authorization|proxy-authorization|x-api-key|x-apikey|api-key|x-auth-token|x-access-token|x-cron-secret|x-webhook-secret|x-admin-key|x-internal-token)$/i;
-
-/** `process.env.SOMETHING_SECRET` and friends — the other half of that check. */
-const SECRET_ENV = /^process\.env\.[A-Z0-9_]*(SECRET|TOKEN|KEY|PASSWORD|PASS)[A-Z0-9_]*$/;
+// CREDENTIAL_HEADERS and SECRET_ENV — the two halves of that check — live in
+// auth-helpers.ts, which applies them to the helper a route calls as well.
 
 /**
  * Calls that only build the HTTP response. A handler whose body contains
@@ -93,6 +99,12 @@ const SECRET_ENV = /^process\.env\.[A-Z0-9_]*(SECRET|TOKEN|KEY|PASSWORD|PASS)[A-
  */
 const RESPONSE_CALLS =
   /^(NextResponse\.(json|redirect|next|rewrite)|Response\.(json|redirect|error)|json|res\.(json|send|status))$/;
+
+/**
+ * Calls that compute a value and touch nothing: a timestamp in a health check, a
+ * string conversion. They are not "work" the endpoint could be made to do.
+ */
+const TRIVIAL_CALLS = /(^|\.)(toISOString|toJSON|getTime|now|uptime|toString|stringify|toLocaleString|toUTCString)$/;
 
 /**
  * Reading the request body. Anchored on the receiver so `NextResponse.json(...)`
@@ -304,7 +316,7 @@ function analyseFunction(
   const inspect = (inner: any) => {
     const full = calleeName(inner.node.callee);
     const tail = calleeTail(inner.node.callee);
-    if (!RESPONSE_CALLS.test(full)) info.workCalls++;
+    if (!RESPONSE_CALLS.test(full) && !TRIVIAL_CALLS.test(full)) info.workCalls++;
     if (REQUEST_INPUT_READ.test(full)) info.readsRequestInput = true;
 
     // `supabase.auth.getSession()` reads the cookie without asking the auth
@@ -325,7 +337,7 @@ function analyseFunction(
       info.hasAuth = true;
     }
     if (matchesAny(full, AUTH_WRAPPERS)) info.hasAuth = true;
-    if (matchesAny(full, SIGNATURE_CHECKS)) info.hasSignatureCheck = true;
+    if (matchesAny(full, SIGNATURE_CHECKS) || SIGNATURE_VERIFY_NAME.test(tail)) info.hasSignatureCheck = true;
     if (VALIDATION_CALLS.has(tail)) info.hasValidation = true;
     if (MUTATION_CALLS.has(tail) && !NOT_A_DATA_WRITE.test(full)) {
       info.hasMutation = true;
@@ -407,6 +419,12 @@ function analyseFunction(
           info.mutationLine = inner.node.loc?.start.line ?? info.line;
         }
       }
+    },
+    // A signature header named anywhere in the handler — `headers.get('stripe-signature')`,
+    // but also `headers.get(name) ?? 'x-webhook-signature'` — means it takes part in
+    // verification. Only call arguments used to count, which missed the fallback form.
+    StringLiteral(inner: any) {
+      if (SIGNATURE_HEADERS.test(inner.node.value)) info.hasSignatureCheck = true;
     },
     MemberExpression(inner: any) {
       const full = calleeName(inner.node);
@@ -547,7 +565,12 @@ export const serverActionsScanner: Scanner = {
           ? `\`${httpMethod} ${relPath.replace(/^(src\/)?app/, '').replace(/\/route\.[tj]sx?$/, '') || '/'}\` is a public HTTP endpoint.`
           : 'Server Actions compile to public HTTP POST endpoints — anyone can invoke this by ID, the UI is not a gate.';
 
-        const writes = info.hasMutation || (isRoute && HTTP_MUTATION_METHODS.has(httpMethod!));
+        // `PUT`/`POST` are assumed to write, but a handler that reads nothing from the
+        // caller, touches no data and does no work — a health check answering with a
+        // constant and a timestamp — has nothing to protect, whatever its method.
+        const doesNothing =
+          isRoute && !info.hasMutation && !info.hasRead && info.workCalls === 0 && !info.readsRequestInput;
+        const writes = info.hasMutation || (isRoute && HTTP_MUTATION_METHODS.has(httpMethod!) && !doesNothing);
         const isWebhook =
           isRoute && httpMethod === 'POST' && /webhook|\bhooks?\b|stripe|clerk|svix/i.test(relPath);
         const isCron = isRoute && /(^|\/)(cron|scheduled|jobs?)(\/|$)/i.test(relPath);
@@ -689,7 +712,13 @@ export const serverActionsScanner: Scanner = {
           });
         }
 
-        if (isWebhook && !info.hasSignatureCheck) {
+        // A route is only an unverified *webhook* if nothing else identifies the caller.
+        // A path containing `stripe` or `webhook` that requires a signed-in user, or a
+        // shared secret (`CRON_SECRET`), is an ordinary authenticated endpoint that
+        // happens to be named for a provider: a checkout creator, a reconcile cron, a
+        // notifier. Reporting those as forgeable webhooks was five of six sampled
+        // findings on real repositories.
+        if (isWebhook && !info.hasSignatureCheck && !info.hasAuth && !secretAuth) {
           push({
             id: 'CTS042',
             severity: 'critical',

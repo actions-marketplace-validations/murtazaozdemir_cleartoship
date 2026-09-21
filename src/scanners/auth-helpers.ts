@@ -19,6 +19,29 @@ import type { File } from '@babel/types';
  * followed, so a call into `node_modules` still proves nothing on its own.
  */
 
+/**
+ * Request headers that carry a credential. A handler that reads one and compares it
+ * against a server-side secret is how a cron or machine-to-machine endpoint
+ * authenticates — there is no session to look up.
+ */
+export const CREDENTIAL_HEADERS =
+  /^(authorization|proxy-authorization|x-api-key|x-apikey|api-key|x-auth-token|x-access-token|x-cron-secret|x-webhook-secret|x-admin-key|x-internal-token)$/i;
+
+/**
+ * `process.env.SOMETHING_SECRET` and friends — the other half of that check. Also the
+ * typed wrapper most apps put in front of it (`env.CRON_SECRET`, from `@/lib/env` or
+ * t3-env), which reads the same variable.
+ */
+export const SECRET_ENV = /^(?:process\.env|env)\.[A-Z0-9_]*(SECRET|TOKEN|KEY|PASSWORD|PASS)[A-Z0-9_]*$/;
+
+// Recorded alongside a function's callee names. A helper that reads a credential
+// header AND a secret from the environment authenticates its caller by shared
+// secret — `authenticateApiRequest(request)` — however it is named, and a route that
+// calls it is authenticated. Only the pair counts: reading a header alone proves
+// nothing, and neither does touching an env var.
+const MARK_CREDENTIAL_HEADER = '\u0000credential-header';
+const MARK_SECRET_ENV = '\u0000secret-env';
+
 /** How many import hops to follow before giving up. */
 const MAX_DEPTH = 3;
 
@@ -57,7 +80,17 @@ function callNamesIn(node: any, out: Set<string>, depth = 0): void {
     if (full) {
       out.add(full);
       out.add(calleeTail(node.callee));
+      if (/headers\.get$/.test(full)) {
+        const arg = node.arguments?.[0];
+        if (arg?.type === 'StringLiteral' && CREDENTIAL_HEADERS.test(arg.value)) {
+          out.add(MARK_CREDENTIAL_HEADER);
+        }
+      }
     }
+  }
+  if (node.type === 'MemberExpression' || node.type === 'OptionalMemberExpression') {
+    const member = calleeName(node);
+    if (member && SECRET_ENV.test(member)) out.add(MARK_SECRET_ENV);
   }
   for (const key of Object.keys(node)) {
     if (key === 'loc' || key === 'leadingComments' || key === 'trailingComments') continue;
@@ -122,7 +155,10 @@ export function authNamesFor(
     if (source === null) return EMPTY;
     // Cheap bail-out: a file that mentions none of the auth vocabulary cannot
     // define an auth helper, and most files in a repo are that file.
-    if (!opts.authCalls.some((c) => source.includes(c.split('.').pop()!))) {
+    if (
+      !opts.authCalls.some((c) => source.includes(c.split('.').pop()!)) &&
+      !/authorization|x-api-key|x-apikey|api-key|x-auth-token|x-access-token|x-cron-secret|x-internal-token|x-admin-key/i.test(source)
+    ) {
       opts.cache.set(file, EMPTY);
       return EMPTY;
     }
@@ -161,6 +197,11 @@ export function authNamesFor(
     let changed = false;
     for (const [name, calls] of functions) {
       if (credited.has(name)) continue;
+      if (calls.has(MARK_CREDENTIAL_HEADER) && calls.has(MARK_SECRET_ENV)) {
+        credited.add(name);
+        changed = true;
+        continue;
+      }
       for (const call of calls) {
         if (
           matchesAny(call, opts.authCalls) ||

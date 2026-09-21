@@ -117,12 +117,17 @@ export const rlsScanner: Scanner = {
         const flat = text.replace(/\s+/g, ' ');
 
         const create = new RegExp(
-          `^create\\s+(?:unlogged\\s+|temp(?:orary)?\\s+)?table\\s+(?:if\\s+not\\s+exists\\s+)?(${QUALIFIED_NAME})`,
+          `^create\\s+(?:unlogged\\s+|temp(?:orary)?\\s+)?table\\s+(if\\s+not\\s+exists\\s+)?(${QUALIFIED_NAME})`,
           'i',
         ).exec(flat);
         if (create) {
-          const name = normaliseTable(create[1]!);
-          const open = text.indexOf('(', create[0].length - create[1]!.length);
+          const name = normaliseTable(create[2]!);
+          // `CREATE TABLE IF NOT EXISTS` on a table that is already there does nothing.
+          // Replaying it as a fresh table reset the model's RLS state to "disabled", so a
+          // schema dump re-declaring tables after the migrations that had enabled RLS on
+          // them reported every one as unprotected.
+          if (create[1] && tables.has(name)) continue;
+          const open = text.indexOf('(', create[0].length - create[2]!.length);
           const body = open === -1 ? '' : text.slice(open + 1, text.lastIndexOf(')'));
           tables.set(name, {
             name,
