@@ -3,7 +3,7 @@
 Public backlog. Working notes, positioning and anything about other projects
 live in `NOTES.private.md`, which is gitignored and stays on my machine.
 
-_Current release: **v0.13.7**. Since v0.13.6 the RLS / Server Actions /
+_Current release: **v0.13.8**. Since v0.13.6 the RLS / Server Actions /
 LLM-agent suites live in the private `cleartoship-rules-pro` repository, and
 v0.13.6's own release run is red — it ran the old workflow, which still tried npm,
 and a re-run uses the workflow as it was at the tag. The release itself is fine. Install from
