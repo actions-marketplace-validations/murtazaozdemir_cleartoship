@@ -3,9 +3,10 @@
 Public backlog. Working notes, positioning and anything about other projects
 live in `NOTES.private.md`, which is gitignored and stays on my machine.
 
-_Current release: **v0.13.6** — the first without the RLS / Server Actions /
-LLM-agent suites, which now live in the private `cleartoship-rules-pro`
-repository. Install from
+_Current release: **v0.13.7**. Since v0.13.6 the RLS / Server Actions /
+LLM-agent suites live in the private `cleartoship-rules-pro` repository, and
+v0.13.6's own release run is red — it ran the old workflow, which still tried npm,
+and a re-run uses the workflow as it was at the tag. The release itself is fine. Install from
 [cleartoship.app](https://cleartoship.app/cleartoship.mjs)
 (`curl -fsSL https://cleartoship.app/cleartoship.mjs -o cleartoship.mjs && node cleartoship.mjs`);
 the same file is on [the GitHub release](https://github.com/murtazaozdemir/cleartoship/releases/latest).
@@ -13,10 +14,11 @@ the same file is on [the GitHub release](https://github.com/murtazaozdemir/clear
 longer use npmjs.com. The package was unpublished on 2026-09-03 and the name is
 unclaimed, so anything on the registry under it is **not from this project**:
 the docs say so, and the Action and CI no longer run or recommend it.
-`release.yml`'s npm publish steps remain but are off unless the repository
-variable `PUBLISH_TO_NPM` is `true`. `deploy-site.yml` serves the release's
-standalone build from the domain and compares its hash with the release asset
-after every deploy._
+`release.yml` has no npm publish steps any more (removed 2026-09-21); the
+`NPM_TOKEN` secret it used is dead and can be deleted from the repository.
+`release.yml` verifies that the release carries a bundle that runs and reports
+its version, and `deploy-site.yml` serves that build from the domain and compares
+its hash with the release asset after every deploy._
 _v0.13.0 and earlier published **unsigned** — npm's registry refuses provenance
 from a private source repo. The repository is public now, and `release.yml`
 reads its visibility, so 0.13.1 is the first release signed with provenance._
