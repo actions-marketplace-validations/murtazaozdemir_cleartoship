@@ -543,13 +543,10 @@ version, including how to report a vulnerability.
   `api.npmjs.org`, `pypi.org`, `api.osv.dev`. No file contents, no paths, no
   project name. `--offline` disables all three and makes a run a pure local
   computation.
-- **A licensed Pro install adds exactly one more host, and still no source.**
-  `cleartoship-rules-pro` verifies your license signature locally, with no
-  network call at all, and only *revalidates* revocation against
-  `cleartoship.app` at most once every ~72 hours, sending your license's id
-  only — never file contents, paths, or findings. If that check fails or
-  times out, the last known-good result is trusted rather than blocking your
-  scan. `--offline` skips it entirely, same as the other three hosts.
+- **Nothing is loaded by name at run time.** Every scanner is compiled into the
+  build you run. ClearToShip never imports a module it finds next to it or in the
+  project's `node_modules`, so scanning a repository cannot run that repository's
+  code — including a package that happens to be named after this project.
 - **No database connection.** The RLS checks (Pro) read your migration files.
   There is no database driver in the dependency tree, free or Pro.
 - **Five runtime dependencies.** Three Babel packages, `commander`,
@@ -571,10 +568,8 @@ const result = await scan({ root: process.cwd(), offline: true });
 console.log(result.counts); // { critical: 0, high: 2, medium: 1, low: 0, info: 0 }
 ```
 
-`scan()` picks up `cleartoship-rules-pro` automatically when it's installed and
-licensed — nothing to import or configure differently. Findings from either
-package come back in the same `result.findings` array, in the same `Finding`
-shape.
+Findings come back in `result.findings`, each in the same `Finding` shape as in
+the CLI's JSON output.
 
 ## Exit codes
 

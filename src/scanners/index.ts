@@ -7,8 +7,9 @@ import type { Scanner } from '../types.js';
 /**
  * The RLS suite (Supabase/Postgres Row Level Security), the Server Actions
  * suite (Next.js Server Actions & Route Handlers) and the LLM/agent risk
- * scanner moved to `cleartoship-rules-pro` — see `src/scanners/optional.ts`
- * for how a licensed install of that package is loaded into a scan.
+ * scanner live in the private `cleartoship-rules-pro` repository and are not part
+ * of this build. Nothing here loads them: scanners are compiled in, never found
+ * by package name at run time.
  */
 export const SCANNERS: Scanner[] = [
   dependencyScanner,

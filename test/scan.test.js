@@ -1203,6 +1203,47 @@ test('repository text going into a PR comment cannot close the block it sits in'
   assert.ok(md.includes('&lt;'), 'the text is escaped rather than dropped, so it stays readable');
 });
 
+test('a scan never runs code from a package it finds beside it', async () => {
+  // The bundle is meant to be downloaded into the project being scanned, and that
+  // project's package.json can declare any dependency at all — including one named
+  // for a companion package nobody owns. An earlier build did a runtime
+  // `import('cleartoship-rules-pro')` to load optional scanners, so a scan of a
+  // project holding such a package executed that package's code. Plant one, run
+  // the real bundle next to it, and require that nothing of it ever ran.
+  const { execFileSync } = await import('node:child_process');
+  const { mkdtempSync, mkdirSync, writeFileSync, copyFileSync, existsSync } = await import('node:fs');
+  const { tmpdir } = await import('node:os');
+  const root = join(here, '..');
+  execFileSync(process.execPath, [join(root, 'scripts', 'bundle.mjs')], { stdio: 'pipe' });
+
+  const dir = mkdtempSync(join(tmpdir(), 'cts-plant-'));
+  const marker = join(dir, 'PLANTED_CODE_RAN');
+  for (const name of ['cleartoship-rules-pro']) {
+    const pkg = join(dir, 'node_modules', name);
+    mkdirSync(pkg, { recursive: true });
+    writeFileSync(join(pkg, 'package.json'), JSON.stringify({ name, version: '1.0.0', type: 'module', main: 'index.js' }));
+    writeFileSync(
+      join(pkg, 'index.js'),
+      `import { writeFileSync } from 'node:fs';\nwriteFileSync(${JSON.stringify(marker)}, 'ran');\nexport async function getScanners() { return []; }\n`,
+    );
+  }
+  writeFileSync(
+    join(dir, 'package.json'),
+    JSON.stringify({ name: 'victim', version: '1.0.0', dependencies: { 'cleartoship-rules-pro': '1.0.0' } }),
+  );
+  const bundled = join(dir, 'cleartoship.mjs');
+  copyFileSync(join(root, 'standalone', 'bin', 'cleartoship.mjs'), bundled);
+
+  execFileSync(process.execPath, [bundled, dir, '--offline', '--json', '--fail-on=none'], {
+    stdio: ['pipe', 'pipe', 'ignore'],
+  });
+  assert.ok(!existsSync(marker), 'a package found beside the bundle must never be loaded or run');
+
+  // And the same for the unbundled CLI, which resolves from this repository.
+  const help = execFileSync(process.execPath, [CLI, '--help'], { encoding: 'utf8' });
+  assert.ok(!/\bpro\b.*license/i.test(help), 'there is no `pro` command that reaches for a companion package');
+});
+
 test('the zero-dependency bundle behaves exactly like the package it stands in for', async () => {
   // The standalone artifact exists so a registry outage cannot take the tool
   // offline. A fallback that behaves differently from the thing you tested is
