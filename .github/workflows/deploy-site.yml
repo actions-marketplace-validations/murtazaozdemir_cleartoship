@@ -53,12 +53,20 @@ jobs:
             exit 1
           }
 
+      # Retried, with wrangler's answer kept in the log. This used to be one read with
+      # stderr thrown away, and a single empty answer from the Cloudflare API is
+      # indistinguishable from "there is no version" — see the confirm step below.
       - name: Record the live version before deploying
         id: before
         run: |
-          v=$(npx wrangler deployments list --name cleartoship 2>/dev/null \
-              | grep -oE '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}' \
-              | tail -1 || true)
+          v=""
+          for attempt in 1 2 3; do
+            out=$(npx wrangler deployments list --name cleartoship 2>&1) || true
+            v=$(echo "$out" | grep -oE '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}' | tail -1 || true)
+            [ -n "$v" ] && break
+            echo "attempt ${attempt}: wrangler returned no version:"; echo "$out" | tail -5
+            sleep 4
+          done
           echo "Live version before deploy: ${v:-none}"
           echo "version=$v" >> "$GITHUB_OUTPUT"
 
@@ -106,12 +114,23 @@ jobs:
       # a missing token failed it in 8s, and both times production quietly served
       # a stale build for days. So this does not merely print the version — it
       # compares, and fails the job if the live Worker did not actually move.
+      #
+      # Read back with retries, not once: the deploy on 265fded printed "Success" and a
+      # new Version ID, then this step asked `wrangler deployments list` one second
+      # later, got nothing back, and failed a good deploy. A read that comes back empty,
+      # or still shows the old version, has not yet proved anything either way; keep
+      # asking, show what wrangler said, and only fail if it never settles.
       - name: Confirm the live version actually changed
         run: |
-          after=$(npx wrangler deployments list --name cleartoship 2>/dev/null \
-                  | grep -oE '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}' \
-                  | tail -1 || true)
           before="${{ steps.before.outputs.version }}"
+          after=""
+          for attempt in 1 2 3 4 5 6; do
+            out=$(npx wrangler deployments list --name cleartoship 2>&1) || true
+            after=$(echo "$out" | grep -oE '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}' | tail -1 || true)
+            if [ -n "$after" ] && { [ -z "$before" ] || [ "$after" != "$before" ]; }; then break; fi
+            echo "attempt ${attempt}: not settled yet (read '${after:-nothing}'). wrangler said:"; echo "$out" | tail -5
+            sleep 5
+          done
           echo "before: ${before:-none}"
           echo "after:  ${after:-none}"
           if [ -z "$after" ]; then
