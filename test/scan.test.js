@@ -25,12 +25,11 @@ buildFixtures();
 const ids = (result) => new Set(result.findings.map((f) => f.id));
 
 test('vulnerable fixture: reports every free-tier rule it is built to trigger', async () => {
-  // CTS001-004, 010-019, 041-046, 050-052 (Server Actions & RLS) and 080-085
-  // (LLM/agent) moved to the licensed cleartoship-rules-pro package — see
-  // the private cleartoship-rules-pro repo's test/{rls,server-actions,agent-logic}.test.js for their
-  // coverage, both licensed and (absent) unlicensed. CTS040 and CTS045 stay
-  // here: despite the numbering, they are implemented in the free secrets
-  // scanner, not the Server Actions scanner.
+  // The Server Actions, RLS and LLM/agent suites (CTS001-004, 010-019, 041-046,
+  // 050-052, 080-085) are asserted in rls.test.js, server-actions.test.js and
+  // agent-logic.test.js. This list is the dependency and secrets surface. CTS040
+  // and CTS045 belong here despite the numbering: they are implemented in the
+  // secrets scanner, not the Server Actions scanner.
   const result = await scan({ root: VULNERABLE, offline: true });
   const found = ids(result);
   for (const expected of [
@@ -190,8 +189,7 @@ test('scanning a repo by absolute path reports paths relative to that repo', () 
   const escaping = files.filter((f) => f.startsWith('..'));
   assert.deepEqual(escaping, [], 'no finding may be reported with a path that climbs out of the repo');
   assert.ok(
-    // admin.ts's finding (a service-role key inside a Server Action) is a
-    // Pro-only rule; logging.ts's CTS070 (free) is the reliable proxy here.
+    // logging.ts's CTS070 is a reliable proxy for "was this directory read".
     files.some((f) => f === 'app/actions/logging.ts'),
     `expected a repo-relative path, got ${files.slice(0, 3).join(', ')}`,
   );
@@ -527,13 +525,11 @@ test('vendored rules add coverage without duplicating our own', async () => {
   }
 
   // A superseded rule must never appear beside the rule that replaced it —
-  // including VG401/VG402/VG427/VG952/VG1007, superseded by the Server
-  // Actions suite. That suite now lives in the licensed cleartoship-rules-pro
-  // package, so an unlicensed scan has zero coverage for it either way: an
-  // earlier attempt to stand these vendored ids back up as free-tier fallback
-  // coverage was reverted after VG1010 reported "critical" on clean-app's
-  // deliberately-safe updateProfile action (see community.ts's SUPERSEDED
-  // doc comment) — a false positive is worse than a silent gap here.
+  // including VG401/VG402/VG427/VG952/VG1007, superseded by the Server Actions
+  // suite. Standing these vendored ids back up as fallback coverage reported
+  // VG1010 as "critical" on clean-app's deliberately-safe updateProfile action
+  // (see community.ts's SUPERSEDED doc comment) — the first-party result is the
+  // precise one.
   const ids = new Set(community.map((f) => f.id));
   for (const superseded of ['VG400', 'VG401', 'VG402', 'VG427', 'VG952', 'VG1007']) {
     assert.ok(!ids.has(superseded), `${superseded} is superseded and must not fire`);
@@ -892,11 +888,9 @@ async function tempProject(files) {
 
 const VULNERABLE_ROUTE = [
   "import { createClient } from '@supabase/supabase-js';",
-  // A hardcoded secret (CTS030, free/secrets scanner) rather than the missing
-  // auth check itself (CTS001, now licensed cleartoship-rules-pro) — this
-  // fixture is a proxy for "was this file/directory actually opened", not a
-  // test of the Server Actions suite, so it only needs a finding a default,
-  // unlicensed scan will actually produce.
+  // A hardcoded secret (CTS030) rather than the missing auth check itself
+  // (CTS001) — this fixture is a proxy for "was this file/directory actually
+  // opened", not a test of the Server Actions suite.
   "const STRIPE_KEY = 'sk_live_51NqAbCdEfGhIjKlMnOpQrStU';",
   'export async function POST(req: Request) {',
   '  const body = await req.json();',

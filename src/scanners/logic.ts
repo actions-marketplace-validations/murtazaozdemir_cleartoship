@@ -16,9 +16,8 @@ import type { Finding, ProjectContext, ScanResult, Scanner } from '../types.js';
  * Each rule is deliberately narrow: the goal is a true positive a developer will
  * act on, not coverage for its own sake.
  *
- * The LLM/agent-specific checks that used to live in this file (CTS080-085)
- * moved to `cleartoship-rules-pro`'s `agent-logic.ts` scanner — see that file
- * for the OWASP LLM Top 10 categories it covers.
+ * The LLM/agent-specific checks (CTS080-085) live in `agent-logic.ts` — see that
+ * file for the OWASP LLM Top 10 categories it covers.
  */
 
 const LOG_METHODS = new Set(['log', 'info', 'warn', 'error', 'debug', 'trace', 'fatal', 'verbose']);

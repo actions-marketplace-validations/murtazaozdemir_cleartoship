@@ -21,31 +21,25 @@ import type { ProjectContext, ScanResult, Scanner, Severity } from '../types.js'
  * These are disabled here rather than deleted from the vendored files, so those
  * stay a faithful copy of upstream and re-vendoring is a straight overwrite.
  *
- * Nine of these ids (noted inline) are superseded by the RLS and Server
- * Actions scanners, which now live in the licensed `cleartoship-rules-pro`
- * package rather than always running in this MIT package. They stay
- * unconditionally suppressed here even without a license, on purpose: an
- * early attempt at standing them back up as free-tier fallback coverage was
- * reverted after it reported `VG1010` — critical — on `clean-app`'s
- * `updateProfile`, a Server Action proven safe by the fixture's own doc
- * comment (an explicit field list, no caller-controlled columns). The
- * vendored version is "the weaker result" for a reason: it is a
- * no-schema-library-detected pattern match, not real argument-flow analysis,
- * and reviving it trades a silent gap for a false "critical" on correct code
- * — worse for a tool whose whole trust model is "a true positive a developer
- * will act on, not coverage for its own sake." So: RLS and Server Actions get
- * zero free-tier coverage, first-party or vendored, the same honest way LLM05
- * gets zero coverage from any static source scan rather than a rule that
- * pretends otherwise.
+ * Those marked inline are superseded by the RLS and Server Actions scanners
+ * (`rls.ts`, `server-actions.ts`). They stay suppressed on purpose: standing the
+ * vendored versions up as fallback coverage reported `VG1010` — critical — on
+ * `clean-app`'s `updateProfile`, a Server Action proven safe by the fixture's own
+ * doc comment (an explicit field list, no caller-controlled columns). The vendored
+ * version is "the weaker result" for a reason: it is a no-schema-library-detected
+ * pattern match, not real argument-flow analysis, and running it would trade the
+ * precise first-party result for a false "critical" on correct code — worse for a
+ * tool whose whole trust model is "a true positive a developer will act on, not
+ * coverage for its own sake."
  */
 const SUPERSEDED = new Map<string, string>([
   ['VG400', 'CTS033/CTS040'],
-  ['VG401', 'CTS002'], // Pro: Server Actions
-  ['VG402', 'CTS001'], // Pro: Server Actions
+  ['VG401', 'CTS002'], // Server Actions suite
+  ['VG402', 'CTS001'], // Server Actions suite
   ['VG411', 'CTS031'],
-  ['VG420', 'CTS001'], // Pro: Server Actions
-  ['VG427', 'CTS041'], // Pro: Server Actions
-  ['VG439', 'CTS016'], // Pro: RLS
+  ['VG420', 'CTS001'], // Server Actions suite
+  ['VG427', 'CTS041'], // Server Actions suite
+  ['VG439', 'CTS016'], // RLS suite
   ['VG604', 'CTS031'],
   ['VG627', 'CTS031'],
   ['VG631', 'CTS031'],
@@ -56,16 +50,16 @@ const SUPERSEDED = new Map<string, string>([
   ['VG671', 'CTS031'],
   ['VG708', 'CTS030'],
   ['VG754', 'CTS031'],
-  ['VG953', 'CTS043'], // Pro: Server Actions
+  ['VG953', 'CTS043'], // Server Actions suite
   ['VG998', 'CTS045'],
   ['VG437', 'CTS033'],
   ['VG860', 'CTS028'],
   ['VG874', 'CTS028'],
   ['VG876', 'CTS031'],
-  ['VG952', 'CTS001'], // Pro: Server Actions
-  ['VG960', 'CTS044'], // Pro: Server Actions
-  ['VG1007', 'CTS003'], // Pro: Server Actions
-  ['VG1010', 'CTS002'], // Pro: Server Actions
+  ['VG952', 'CTS001'], // Server Actions suite
+  ['VG960', 'CTS044'], // Server Actions suite
+  ['VG1007', 'CTS003'], // Server Actions suite
+  ['VG1010', 'CTS002'], // Server Actions suite
 ]);
 
 /**

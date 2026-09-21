@@ -1,7 +1,7 @@
 /**
  * Generic scanner infrastructure, re-exported for first-party companion
- * packages (currently `cleartoship-rules-pro`) that implement their own
- * `Scanner`s outside this repository.
+ * packages that implement their own `Scanner`s outside this repository. None is
+ * loaded by this build; every scanner it runs is compiled in.
  *
  * This is not a public API in the semver sense: it exists so a companion
  * package can reuse the same AST/file/suppression plumbing every scanner in
