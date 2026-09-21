@@ -25,7 +25,7 @@ import type { File } from '@babel/types';
  * authenticates — there is no session to look up.
  */
 export const CREDENTIAL_HEADERS =
-  /^(authorization|proxy-authorization|x-api-key|x-apikey|api-key|x-auth-token|x-access-token|x-cron-secret|x-webhook-secret|x-admin-key|x-internal-token)$/i;
+  /^(authorization|proxy-authorization|x-api-key|x-apikey|api-key|x-admin-key|x-access-code|x-passcode|(?!x-[cx]srf)x-[a-z0-9-]+-(secret|token))$/i;
 
 /**
  * `process.env.SOMETHING_SECRET` and friends — the other half of that check. Also the
@@ -157,7 +157,7 @@ export function authNamesFor(
     // define an auth helper, and most files in a repo are that file.
     if (
       !opts.authCalls.some((c) => source.includes(c.split('.').pop()!)) &&
-      !/authorization|x-api-key|x-apikey|api-key|x-auth-token|x-access-token|x-cron-secret|x-internal-token|x-admin-key/i.test(source)
+      !/authorization|x-api-key|x-apikey|api-key|x-[a-z0-9-]+-(secret|token)|x-access-code|x-passcode|x-admin-key/i.test(source)
     ) {
       opts.cache.set(file, EMPTY);
       return EMPTY;

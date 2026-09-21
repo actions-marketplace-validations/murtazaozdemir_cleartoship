@@ -4,6 +4,7 @@ import {
   traverse, buildModuleIndex, Suppressions, emptyResult,
 } from '../internal.js';
 import { authNamesFor, CREDENTIAL_HEADERS, SECRET_ENV } from './auth-helpers.js';
+import { inertNamesFor } from './effects.js';
 import type { Finding, ProjectContext, ScanResult, Scanner } from '../internal.js';
 
 /**
@@ -40,6 +41,70 @@ const AUTH_WRAPPERS = [
 const NOT_A_DATA_WRITE =
   /(^|\.)(chat\.completions|completions|responses|messages|embeddings|images|audio|moderations|files|threads|runs|assistants)\.(create|update)$/;
 
+/**
+ * `.delete` / `.remove` on something that is not a data store. `cookies().delete(name)`,
+ * `url.searchParams.delete('preview')` and `headers.delete(...)` clear a cookie, a query
+ * parameter or a header on the caller's own request — read as "performs a database
+ * mutation" they turned three logout handlers and a preview-exit route into criticals.
+ */
+const NOT_A_DATA_RECEIVER =
+  /(^|\.)(cookies|cookieStore|cookieJar|searchParams|headers|params|url|urlObj|nextUrl)\.(delete|remove)$/i;
+
+/**
+ * Calls into an LLM or embedding provider. What such a call risks is cost and prompt
+ * abuse, which the AI-specific rules name; it writes nothing, so a POST whose only
+ * effect is one is not "a write with no auth check". A receiver named for the provider
+ * is matched, not a bare `.create`, which `db.messages.create` would also satisfy.
+ */
+const AI_CALLS = new RegExp(
+  '^(?:streamText|generateText|generateObject|streamObject|embed|embedMany|convertToModelMessages|' +
+    'convertToCoreMessages|createUIMessageStreamResponse|createOpenAI|createAnthropic|' +
+    'createGoogleGenerativeAI|openai|anthropic|zodResponseFormat|zodTextFormat|zodFunction)$' +
+    '|(?:^|\\.)chat\\.completions\\.(?:create|stream|parse)$' +
+    '|(?:^|\\.)(?:openai|anthropic|genai|genAI|groq|mistral|cohere|deepseek|gemini|openrouter)\\.[\\w.]+$' +
+    '|(?:^|\\.)(?:generateContent|generateContentStream|getGenerativeModel)$',
+);
+
+/**
+ * Calls with no effect outside the process: reading the request, string and array
+ * helpers, logging, building the response. A handler whose only other calls are LLM
+ * calls has nothing but that call to do.
+ */
+const INERT_CALL_TAILS = new Set([
+  // Reading the request, and the response builders.
+  'json', 'text', 'formData', 'arrayBuffer', 'blob', 'get', 'getAll', 'has', 'entries', 'keys',
+  'values', 'redirect', 'notFound', 'toDataStreamResponse', 'toUIMessageStreamResponse',
+  'toTextStreamResponse', 'toDataStream', 'pipeThrough',
+  // Strings, arrays, numbers, JSON.
+  'map', 'filter', 'slice', 'join', 'trim', 'trimStart', 'trimEnd', 'split', 'includes',
+  'startsWith', 'endsWith', 'replace', 'replaceAll', 'toLowerCase', 'toUpperCase', 'push',
+  'concat', 'find', 'findIndex', 'findLast', 'some', 'every', 'reduce', 'flat', 'flatMap',
+  'forEach', 'sort', 'reverse', 'fill', 'splice', 'shift', 'unshift', 'pop', 'at', 'indexOf',
+  'lastIndexOf', 'charAt', 'codePointAt', 'padStart', 'padEnd', 'repeat', 'normalize',
+  'substring', 'substr', 'search', 'localeCompare', 'match', 'matchAll', 'test', 'toFixed',
+  'parse', 'safeParse', 'stringify', 'isArray', 'from', 'fromEntries', 'assign', 'isInteger',
+  'isFinite', 'isNaN', 'parseInt', 'parseFloat', 'floor', 'ceil', 'round', 'min', 'max',
+  'abs', 'random', 'String', 'Number', 'Boolean', 'encodeURIComponent', 'decodeURIComponent',
+  'btoa', 'atob', 'structuredClone',
+  // Logging.
+  'log', 'warn', 'error', 'info', 'debug',
+]);
+
+/** Outbound HTTP clients: a `.get` on one is a network call, not a lookup. */
+const HTTP_CLIENT_ROOT = /^(axios|got|ky|superagent|needle)\./;
+
+/** A call with no effect outside the process. */
+function isInertCall(full: string, tail: string): boolean {
+  if (AI_CALLS.test(full)) return true;
+  if (HTTP_CLIENT_ROOT.test(full)) return false;
+  return (
+    RESPONSE_CALLS.test(full) ||
+    TRIVIAL_CALLS.test(full) ||
+    INERT_CALL_TAILS.has(tail) ||
+    REQUEST_INPUT_READ.test(full)
+  );
+}
+
 /** Data-writing calls across Supabase, Prisma, Drizzle, Mongoose and raw SQL. */
 const MUTATION_CALLS = new Set([
   'insert', 'update', 'upsert', 'delete', 'create', 'createMany', 'updateMany',
@@ -74,7 +139,20 @@ const SIGNATURE_CHECKS = [
  * webhook, and the fixed list above can never enumerate every such name.
  */
 const SIGNATURE_VERIFY_NAME =
-  /(?=.*(?:signature|hmac|webhook))(?=.*(?:verif|valid|check|authent|assert|construct))/i;
+  /(?=.*(?:signature|hmac|webhook|signed[_-]?request))(?=.*(?:verif|valid|check|authent|authori[sz]|assert|construct))/i;
+
+/**
+ * The narrower reading of the same idea, for a route whose PATH does not say webhook: a
+ * callee or member named for verifying a signature — `verifyAndDecodeSignedRequest`,
+ * `parsed.isValidSignature` — proves the caller wherever the route lives. `webhook` and
+ * `check` are left out on purpose: `checkWebhookStatus()` is not a verification.
+ */
+const STRONG_SIGNATURE_NAME =
+  /(?=.*(?:signature|hmac|signed[_-]?request))(?=.*(?:verif|valid|authent|authori[sz]|assert|construct))/i;
+
+/** `requireVerifiedActor(req.headers)`, `authorizeRequest(request)`: an auth verb handed the request. */
+const AUTH_VERB_HELPER = /^(?:require|assert|ensure|authorize|authenticate)[A-Z_]/;
+const REQUEST_PARAM = /^(req|request|_req|_request|nextRequest)$/;
 
 /**
  * Request headers that only exist to carry a webhook signature. A handler that
@@ -191,6 +269,128 @@ function matchesAny(name: string, list: string[]): boolean {
   return false;
 }
 
+/** True when any node in the subtree satisfies `pred`. */
+function someNode(node: any, pred: (n: any) => boolean, depth = 0): boolean {
+  if (!node || typeof node !== 'object' || depth > 200) return false;
+  if (Array.isArray(node)) return node.some((child) => someNode(child, pred, depth + 1));
+  if (typeof node.type !== 'string') return false;
+  if (pred(node)) return true;
+  for (const key of Object.keys(node)) {
+    if (key === 'loc' || key === 'leadingComments' || key === 'trailingComments') continue;
+    const value = node[key];
+    if (value && typeof value === 'object' && someNode(value, pred, depth + 1)) return true;
+  }
+  return false;
+}
+
+/**
+ * Module-level bindings that hold a server-side secret: `const API_KEY = process.env.CRON_API_KEY`.
+ * The handler compares the header against `API_KEY`, so the environment read it is
+ * checked against sits outside the function the scanner is looking at.
+ */
+function moduleSecretConsts(ast: any): Set<string> {
+  const names = new Set<string>();
+  for (const stmt of ast.program.body) {
+    const decl = stmt.type === 'ExportNamedDeclaration' ? stmt.declaration : stmt;
+    if (decl?.type !== 'VariableDeclaration') continue;
+    for (const d of decl.declarations ?? []) {
+      if (d?.id?.type !== 'Identifier') continue;
+      let init = d.init;
+      // `process.env.X!`, `process.env.X as string`, `process.env.X ?? ''`
+      while (
+        init &&
+        (init.type === 'TSNonNullExpression' || init.type === 'TSAsExpression' || init.type === 'LogicalExpression')
+      ) {
+        init = init.type === 'LogicalExpression' ? init.left : init.expression;
+      }
+      if (init?.type === 'MemberExpression' && SECRET_ENV.test(calleeName(init))) names.add(d.id.name);
+    }
+  }
+  return names;
+}
+
+/**
+ * The request, or the part of it that carries credentials: `req`, `request.headers`,
+ * `request.cookies`, `headers()`, `cookies()`. Not its body or URL — those are what the
+ * caller chose to say, and handing them to a function is not handing it a credential.
+ */
+function isRequestish(arg: any): boolean {
+  let inner = arg;
+  while (inner && (inner.type === 'AwaitExpression' || inner.type === 'TSNonNullExpression')) {
+    inner = inner.argument ?? inner.expression;
+  }
+  if (!inner) return false;
+  if (inner.type === 'CallExpression') {
+    return inner.callee?.type === 'Identifier' && (inner.callee.name === 'headers' || inner.callee.name === 'cookies');
+  }
+  if (inner.type === 'Identifier') {
+    return REQUEST_PARAM.test(inner.name) || inner.name === 'headers' || inner.name === 'cookies';
+  }
+  if (inner.type === 'MemberExpression' || inner.type === 'OptionalMemberExpression') {
+    const prop = inner.property?.name;
+    return (
+      inner.object?.type === 'Identifier' &&
+      REQUEST_PARAM.test(inner.object.name) &&
+      (prop === 'headers' || prop === 'cookies')
+    );
+  }
+  return false;
+}
+
+/**
+ * Checks that are about where a request came from or how often, not who sent it. A 403 from
+ * one of these is not authentication.
+ */
+const NOT_AN_IDENTITY_CHECK = /origin|csrf|xsrf|referer|cors|rate|limit|throttle|captcha/i;
+
+/**
+ * A helper that only reads a value off the request — `header(request, 'x-actor-role')`,
+ * `getQuery(req)`. It hands back what the caller sent, verified by nothing, so its result
+ * is a claim however many `if`s it later feeds.
+ */
+const RAW_REQUEST_READER = /^(?:get|read)?_?(?:header|headers|param|params|query|search|body|ip|url|origin|host|locale|lang|json|text)s?$/i;
+
+/**
+ * A call whose result speaks to who the caller is: it is handed the request (or its
+ * headers/cookies), or it reads a credential header or a cookie itself.
+ */
+function isCredentialSource(n: any): boolean {
+  if (n.type !== 'CallExpression') return false;
+  const full = calleeName(n.callee);
+  const tail = calleeTail(n.callee);
+  if (NOT_AN_IDENTITY_CHECK.test(tail) || RAW_REQUEST_READER.test(tail)) return false;
+  const first = n.arguments?.[0];
+  if (/(^|\.)headers\.get$/.test(full)) {
+    return first?.type === 'StringLiteral' && CREDENTIAL_HEADERS.test(first.value);
+  }
+  if (/(^|\.)cookies\.get$/.test(full)) return true;
+  return (n.arguments ?? []).some((arg: any) => isRequestish(arg));
+}
+
+/** `return ...{ status: 401 }`, `res.status(403)`, `unauthorized()`, `throw new Error('Unauthorized')`. */
+function isUnauthorisedExit(n: any): boolean {
+  if (n.type === 'ObjectProperty') {
+    return propertyKey(n) === 'status' && n.value?.type === 'NumericLiteral' && (n.value.value === 401 || n.value.value === 403);
+  }
+  if (n.type === 'CallExpression') {
+    const callee = n.callee;
+    if (callee?.type === 'Identifier') return callee.name === 'unauthorized' || callee.name === 'forbidden';
+    return (
+      callee?.type === 'MemberExpression' &&
+      callee.property?.name === 'status' &&
+      n.arguments?.[0]?.type === 'NumericLiteral' &&
+      (n.arguments[0].value === 401 || n.arguments[0].value === 403)
+    );
+  }
+  if (n.type === 'ThrowStatement') {
+    return someNode(
+      n.argument,
+      (m) => m.type === 'StringLiteral' && /unauthori[sz]ed|unauthenticated|forbidden|not authori[sz]ed/i.test(m.value),
+    );
+  }
+  return false;
+}
+
 interface ActionInfo {
   name: string;
   line: number;
@@ -219,6 +419,12 @@ interface ActionInfo {
   readsRequestInput: boolean;
   /** Line where the caller's payload object is written whole, not field by field. */
   wholePayloadLine: number | null;
+  /** Calls into an LLM provider. */
+  aiCalls: number;
+  /** Callee names that are none of: response, trivial, request read, string/array helper, LLM. */
+  effectCalls: string[];
+  /** A signature check that authenticates the caller wherever the route lives. */
+  verifiesSignature: boolean;
 }
 
 function analyseFunction(
@@ -226,6 +432,8 @@ function analyseFunction(
   name: string,
   /** Names that stand for an auth check in this file — see ./auth-helpers.ts. */
   credited: ReadonlySet<string>,
+  /** Module-level `const KEY = process.env.SOME_SECRET` names, read by identifier. */
+  secretConsts: ReadonlySet<string>,
 ): ActionInfo {
   const node = path.node;
   const info: ActionInfo = {
@@ -251,6 +459,9 @@ function analyseFunction(
     // and read one, so that is detected below.
     readsRequestInput: false,
     wholePayloadLine: null,
+    aiCalls: 0,
+    effectCalls: [],
+    verifiesSignature: false,
   };
 
   // An id the caller passed in is not proof of ownership — it is the IDOR.
@@ -318,6 +529,18 @@ function analyseFunction(
     const tail = calleeTail(inner.node.callee);
     if (!RESPONSE_CALLS.test(full) && !TRIVIAL_CALLS.test(full)) info.workCalls++;
     if (REQUEST_INPUT_READ.test(full)) info.readsRequestInput = true;
+    const isAiCall = AI_CALLS.test(full);
+    if (isAiCall) info.aiCalls++;
+    else if (!isInertCall(full, tail) && !info.effectCalls.includes(full)) info.effectCalls.push(full);
+    // `requireVerifiedActor(req.headers, 'read')`, `authorizeRequest(request)`: an
+    // authorisation verb handed the request. Only the pair counts — `requireEnv()` or
+    // `ensureDirectory(path)` is not handed a request to check.
+    if (
+      AUTH_VERB_HELPER.test(tail) &&
+      (inner.node.arguments ?? []).some((arg: any) => isRequestish(arg))
+    ) {
+      info.hasAuth = true;
+    }
 
     // `supabase.auth.getSession()` reads the cookie without asking the auth
     // server whether the token is still valid, so it proves nothing on the
@@ -338,8 +561,16 @@ function analyseFunction(
     }
     if (matchesAny(full, AUTH_WRAPPERS)) info.hasAuth = true;
     if (matchesAny(full, SIGNATURE_CHECKS) || SIGNATURE_VERIFY_NAME.test(tail)) info.hasSignatureCheck = true;
+    if (STRONG_SIGNATURE_NAME.test(tail) || /(^|\.)(webhooks\.)?constructEvent(Async)?$/.test(full)) {
+      info.verifiesSignature = true;
+    }
     if (VALIDATION_CALLS.has(tail)) info.hasValidation = true;
-    if (MUTATION_CALLS.has(tail) && !NOT_A_DATA_WRITE.test(full)) {
+    if (
+      MUTATION_CALLS.has(tail) &&
+      !NOT_A_DATA_WRITE.test(full) &&
+      !NOT_A_DATA_RECEIVER.test(full) &&
+      !isAiCall
+    ) {
       info.hasMutation = true;
       if (info.mutationLine === null) {
         info.mutationLine = inner.node.loc?.start.line ?? info.line;
@@ -430,6 +661,8 @@ function analyseFunction(
       const full = calleeName(inner.node);
       if (/headers\.get$/.test(full) || full.endsWith('CRON_SECRET')) info.readsAuthHeader = true;
       if (SECRET_ENV.test(full)) info.readsSecretEnv = true;
+      // `parsed.isValidSignature` — an SDK hands back the verdict as a property.
+      if (STRONG_SIGNATURE_NAME.test(calleeTail(inner.node))) info.verifiesSignature = true;
       // `request.url` / `req.nextUrl` are read to get at the query string.
       if (/(^|\.)searchParams$/.test(full) || /(^|\.)(req|request)\??\.(url|nextUrl)$/i.test(full)) {
         info.readsRequestInput = true;
@@ -456,6 +689,32 @@ function analyseFunction(
       // `const { searchParams } = new URL(request.url)` — destructured, so it
       // never appears as a member expression.
       if (inner.node.name === 'searchParams') info.readsRequestInput = true;
+      // `const API_KEY = process.env.CRON_API_KEY` at module scope, compared below.
+      if (secretConsts.has(inner.node.name)) info.readsSecretEnv = true;
+    },
+  });
+
+  // A handler that turns a caller away with 401/403 on the strength of what a credential
+  // check returned — `const authInfo = getAuthInfoFromCookie(request); if (!authInfo) return
+  // 401`, or a bearer key looked up in a table — authenticates, whatever the helper is called.
+  // Two things do not count. A value that never touched a credential (`getUserId()` that mints
+  // an id when none exists). And a claim: `x-actor-role: owner` compared to a literal, or an
+  // approval flag read from a row the body's own id selected, is the caller describing
+  // themselves or their request, not proving who they are — both were real bugs in the sample.
+  const credentialDerived = new Set<string>();
+  const touchesCredential = (node: any) =>
+    someNode(node, (n) => (n.type === 'Identifier' && credentialDerived.has(n.name)) || isCredentialSource(n));
+  path.traverse({
+    VariableDeclarator(inner: any) {
+      if (!inner.node.init || !touchesCredential(inner.node.init)) return;
+      for (const n of parameterNames([inner.node.id])) credentialDerived.add(n);
+    },
+    IfStatement(inner: any) {
+      if (info.hasAuth || !touchesCredential(inner.node.test)) return;
+      // A guard after the write turns the caller away once the row is already changed.
+      const guardLine = inner.node.loc?.start.line ?? 0;
+      if (info.mutationLine !== null && guardLine > info.mutationLine) return;
+      if (someNode(inner.node.consequent, isUnauthorisedExit)) info.hasAuth = true;
     },
   });
 
@@ -521,6 +780,12 @@ export const serverActionsScanner: Scanner = {
       cache: new Map<string, ReadonlySet<string>>(),
     };
 
+    const effectOptions = {
+      isInert: isInertCall,
+      index: helperOptions.index,
+      cache: new Map<string, ReadonlySet<string>>(),
+    };
+
     for (const file of ctx.files) {
       if (!isScript(file)) continue;
       const source = read(file);
@@ -539,6 +804,7 @@ export const serverActionsScanner: Scanner = {
       const suppress = new Suppressions(source);
       const programUseServer = moduleUseServer || hasDirective(ast.program, 'use server');
       const credited = authNamesFor(file, helperOptions, ast);
+      const secretConsts = moduleSecretConsts(ast);
 
       const push = (f: Omit<Finding, 'file'> & { line: number }) => {
         if (suppress.suppressed(f.line, f.id)) return;
@@ -556,7 +822,7 @@ export const serverActionsScanner: Scanner = {
         const isRoute = Boolean(httpMethod);
         if (!isAction && !isRoute) return;
 
-        const info = analyseFunction(path, name, credited);
+        const info = analyseFunction(path, name, credited, secretConsts);
         if (isAction) actionCount++;
         if (isRoute) routeCount++;
 
@@ -570,7 +836,19 @@ export const serverActionsScanner: Scanner = {
         // constant and a timestamp — has nothing to protect, whatever its method.
         const doesNothing =
           isRoute && !info.hasMutation && !info.hasRead && info.workCalls === 0 && !info.readsRequestInput;
-        const writes = info.hasMutation || (isRoute && HTTP_MUTATION_METHODS.has(httpMethod!) && !doesNothing);
+        // Likewise a handler whose only effect is an LLM call: it writes nothing, and what it
+        // risks — someone else spending your key — is what the AI rules name.
+        // The same holds when the calls that are left are helpers that provably do nothing
+        // outside the process (see ./effects.ts). Only worked out for the method-only case,
+        // since that is the only place it changes the answer.
+        const methodOnly =
+          isRoute && !info.hasMutation && HTTP_MUTATION_METHODS.has(httpMethod!) && !doesNothing;
+        let effectFree = false;
+        if (methodOnly && (info.aiCalls > 0 || info.effectCalls.length > 0)) {
+          const inert = inertNamesFor(file, effectOptions, ast);
+          effectFree = info.effectCalls.every((call) => inert.has(call));
+        }
+        const writes = info.hasMutation || (methodOnly && !effectFree);
         const isWebhook =
           isRoute && httpMethod === 'POST' && /webhook|\bhooks?\b|stripe|clerk|svix/i.test(relPath);
         const isCron = isRoute && /(^|\/)(cron|scheduled|jobs?)(\/|$)/i.test(relPath);
@@ -581,7 +859,13 @@ export const serverActionsScanner: Scanner = {
         // reported at low rather than as a blocking critical.
         const PUBLIC_BY_DESIGN_ROUTE =
           /(^|\/|-)(login|signin|sign-in|register|signup|sign-up|forgot-password|reset-password|verify-email|resend-verification|magic-link|contact|lead|leads|waitlist|subscribe|unsubscribe|newsletter)(\/|-|\.|$)/i;
-        const intentionallyPublic = isRoute && PUBLIC_BY_DESIGN_ROUTE.test(relPath);
+        // Signing out only ends the caller's own session, so it needs no session to be
+        // recognised — unless it reads who to sign out from the request, which is the
+        // one way a logout endpoint is a bug (`/logout` taking a `userId` from the body).
+        const LOGOUT_ROUTE = /(^|\/|-)(logout|log-out|signout|sign-out)(\/|-|\.|$)/i;
+        const intentionallyPublic =
+          isRoute &&
+          (PUBLIC_BY_DESIGN_ROUTE.test(relPath) || (LOGOUT_ROUTE.test(relPath) && !info.readsRequestInput));
 
         // A machine-to-machine endpoint has no session to look up: it proves the
         // caller by comparing a credential header against a server-side secret.
@@ -590,7 +874,7 @@ export const serverActionsScanner: Scanner = {
         // For a webhook, the provider signature *is* the caller's identity.
         // CTS042 below is the rule for a webhook that verifies nothing.
         const verifiedWebhook = isWebhook && info.hasSignatureCheck;
-        const authenticated = info.hasAuth || secretAuth || verifiedWebhook;
+        const authenticated = info.hasAuth || secretAuth || verifiedWebhook || info.verifiesSignature;
 
         if (writes && !authenticated && info.getSessionLine === null) {
           push({
