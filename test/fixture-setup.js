@@ -88,8 +88,16 @@ export function buildFixtures() {
       /* not there yet */
     }
   }
-  symlinkSync(VULNERABLE, join(INDIRECT, 'escape'), 'dir');
-  symlinkSync(INDIRECT, join(INDIRECT, 'self'), 'dir');
+  // `node --test` runs the test files as parallel processes and more than one of them
+  // builds these fixtures, so another process may have created the link between the
+  // removal above and here. Either process winning leaves the same link in place.
+  for (const [target, link] of [[VULNERABLE, 'escape'], [INDIRECT, 'self']]) {
+    try {
+      symlinkSync(target, join(INDIRECT, link), 'dir');
+    } catch (err) {
+      if (err.code !== 'EEXIST') throw err;
+    }
+  }
 
   // A bare directory is enough: the scanner only checks that one exists.
   for (const root of [VULNERABLE, CLEAN, INDIRECT]) {
