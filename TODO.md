@@ -84,14 +84,12 @@ them found a credential-shaped literal in a comment written the same afternoon.
       Developer Agreement**. That is a legal acceptance, so it has to be done by
       hand on the release page. The `curl … cleartoship.mjs` recipe in the README works
       everywhere regardless, and on any CI, not just GitHub.
-- [ ] **A user who is not me.** *The one that actually matters.* Every
-      calibration decision so far has been made against my own six repositories,
-      which is the biggest single weakness in the tool's judgement, and no amount
-      of further dogfooding fixes it — I would only be re-testing the same code
-      against the same assumptions. The cheapest way to fix it is to run the
-      scanner over somebody else's Next.js + Supabase + AI-agent codebase and
-      walk them through the report, in exchange for permission to fix whatever
-      comes back wrong. Five of those would teach more than the next five rules.
+- [ ] **Get it in front of people, as early as possible.** Publish and publicize
+      now; there is no minimum number of users to reach first (decided 2026-09-21).
+      Every calibration decision so far was made against my own six repositories,
+      which remains the biggest weakness in the tool's judgement, but the way to
+      fix it is more people running it and reporting what comes back wrong, not
+      recruiting a set number of testers before launching.
 
 ## Later — recorded, not being worked on
 
@@ -156,38 +154,18 @@ avoid.
 
 ## Pricing
 
-**Open-core, built but not launched.** The RLS, Server Actions and LLM/agent
-suites moved into a separate, **private** repository — `cleartoship-rules-pro`,
-checked out beside this one at `../cleartoship-rules-pro` and never pushed
-to this public repo — license-gated by a locally-verified, offline-first
-signed token with best-effort revocation checking against a Worker+D1 server
-under `site/`. Everything free stays MIT and unchanged. Not live: no license
-has ever been sold, and Stripe isn't wired up (see "Wire up Stripe billing"
-above) — first licenses will be issued manually against PayPal payments
-instead. The D1 database (`cleartoship-licenses`) was created 2026-09-07 and
-`site/wrangler.jsonc`'s `database_id` points at it; the `0001_licenses.sql`
-migration is applied on the remote. Still open:
-`cleartoship-rules-pro`'s dependency on `cleartoship` is a local `file:` reference
-that has to become a real npm semver range before it can be published itself,
-and none of this can go live before the npm-republish blocker two paragraphs
-up is fixed — a licensed pro package plugging into a free package nobody can
-`npx install` doesn't do anything.
+**Everything is free while ClearToShip is in beta (decided 2026-09-21).** The
+RLS, Server Actions and LLM/agent suites had been split into a private
+`cleartoship-rules-pro` repository for a planned $5/month Pro tier. They are back
+in this repository, MIT licensed, and ship in the free bundle. Why: a separate
+package cannot be installed now that npm is out, so an unpublished paid tier
+delivered nothing; the tool's headline features (the agent surface) were missing
+from the download; and the same rules had been public under MIT since v0.4.
 
-**Price: $5/month, decided 2026-09-07 — planned, not on sale.** One tier, no
-seats, no usage limits. As of 2026-09-20 `site/public/pricing.html` (linked from
-nav/footer on `/` and `/help`) says so plainly: **free while in beta, Pro
-coming, nothing to buy.** The "Get Pro" button and its `PAYPAL-LINK-PLACEHOLDER`
-were removed rather than left pointing at a dead anchor, along with the "manual
-PayPal billing" callout and the cancel/refund FAQ answers that described a
-purchase flow that does not exist — so the placeholder no longer blocks
-`wrangler deploy`. When there is something to sell: replace the disabled
-"Not on sale yet" span with the real checkout link, restore the billing
-explanation, and build the `/admin/license/issue` endpoint (bearer-token-gated,
-mirrors the Stripe webhook's `upsertLicense`/`signLicenseToken` calls) that
-turns a payment notification into a delivered key — designed in conversation,
-not yet built.
-
-No price has been set. Still no tiers beyond the one Pro bundle.
+The private repository and the license-issuing Worker under `site/` (D1 database,
+Ed25519 token signing, Stripe webhook code) remain, dormant, in case a paid tier
+is ever wanted. Nothing charges anyone. No price is set — $5/month was only ever a
+plan — and what is free now stays free.
 
 ## Contributing
 

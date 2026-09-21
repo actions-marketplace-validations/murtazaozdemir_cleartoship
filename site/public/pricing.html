@@ -5,9 +5,9 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="theme-color" content="#0a0d12">
 <title>Pricing — ClearToShip</title>
-<meta name="description" content="ClearToShip is free while in beta. A paid Pro tier for the Row Level Security, Server Actions and LLM/agent rule suites is planned, but nothing is on sale yet.">
+<meta name="description" content="ClearToShip is free while in beta — every check, including Row Level Security, Server Actions and LLM/agent risk. A paid tier may come later; nothing is on sale.">
 <meta property="og:title" content="ClearToShip — Pricing">
-<meta property="og:description" content="Free while in beta. A Pro tier for the RLS, Server Actions and LLM/agent checks is planned.">
+<meta property="og:description" content="Free while in beta: every check, no account. A paid tier may come later.">
 <meta property="og:type" content="website">
 <meta property="og:url" content="https://cleartoship.app/pricing">
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🛡️</text></svg>">
@@ -163,12 +163,12 @@
   <section class="hero">
     <div class="wrap">
       <span class="eyebrow"><span class="dot"></span> Free while in beta</span>
-      <h1>Free for now.<br><span class="accent">Pro is coming.</span></h1>
+      <h1>Free.<br><span class="accent">All of it, for now.</span></h1>
       <p class="lede">
-        Everything that catches dependency, secrets and error-handling problems is free
-        forever, no account. The rules that catch the most severe issues — database
-        permissions, Server Action auth, LLM/agent risk — will be a paid Pro tier. It
-        isn't on sale yet, so there is nothing to pay today.
+        Every check ClearToShip has — dependencies, secrets, error handling, database
+        permissions, Server Action auth, LLM/agent risk — is free while it's in beta, no
+        account and no key. A paid tier may come later, once people are using it and it's
+        clear what they'd pay for. There is nothing to buy today.
       </p>
     </div>
   </section>
@@ -179,36 +179,37 @@
       <div class="plans">
 
         <div class="plan free">
-          <div class="name">Free</div>
-          <div class="price">$0 <span class="per">forever</span></div>
-          <p class="desc">The dependency, secrets and error-handling checks. No account, no key, ever.</p>
+          <div class="name">Everything</div>
+          <div class="price">$0 <span class="per">during the beta</span></div>
+          <p class="desc">All of the checks. No account, no key, nothing uploaded.</p>
           <ul>
             <li><span class="ck">✓</span> Hallucinated &amp; hostile dependency detection (npm, PyPI, live OSV CVEs)</li>
             <li><span class="ck">✓</span> Secrets &amp; client-bundle scanning — 234 credential patterns, entropy-gated</li>
             <li><span class="ck">✓</span> Logging, error-handling &amp; deserialization checks</li>
+            <li><span class="ck">✓</span> Row Level Security suite — 13 rules for Supabase/Postgres</li>
+            <li><span class="ck">✓</span> Server Actions &amp; Route Handlers suite — 10 rules for Next.js</li>
+            <li><span class="ck">✓</span> LLM &amp; agent risk suite — 6 rules for prompt injection, runaway cost, unchecked agent actions</li>
             <li><span class="ck">✓</span> Full vendored community ruleset (GuardVibe, gitleaks)</li>
-            <li><span class="ck">✓</span> Runs on your machine or CI — nothing uploaded</li>
+            <li><span class="ck">✓</span> Runs on your machine or CI</li>
           </ul>
           <a href="/#start" class="cta">Get started free</a>
           <p class="fine">MIT licensed, always.</p>
         </div>
 
         <div class="plan pro">
-          <span class="badge">Coming</span>
-          <div class="name">Pro</div>
-          <div class="price">Not on sale <span class="per">yet</span></div>
-          <p class="desc">Everything in Free, plus the three suites that catch the most severe issues in AI-built apps.</p>
+          <span class="badge">Maybe later</span>
+          <div class="name">A paid tier</div>
+          <div class="price">Not decided</div>
+          <p class="desc">If people use ClearToShip and want more, one may follow.</p>
           <ul>
-            <li><span class="ck">✓</span> Everything in Free</li>
-            <li><span class="ck">✓</span> Row Level Security suite — 13 rules for Supabase/Postgres</li>
-            <li><span class="ck">✓</span> Server Actions &amp; Route Handlers suite — 10 rules for Next.js</li>
-            <li><span class="ck">✓</span> LLM &amp; agent risk suite — 6 rules for prompt injection, runaway cost, unchecked agent actions</li>
-            <li><span class="ck">✓</span> Offline-verified license, no data collection beyond a revocation check</li>
+            <li><span class="ck">✓</span> New rules on top — nothing free today would move behind it</li>
+            <li><span class="ck">✓</span> Announced here and in the README before it exists</li>
+            <li><span class="ck">✓</span> Price and terms spelled out before you pay anything</li>
           </ul>
-          <!-- Deliberately not a link: there is nothing to buy yet. When billing exists,
-               replace this span with the real checkout link. -->
-          <span class="cta" aria-disabled="true" style="opacity:.55;cursor:default">Not on sale yet</span>
-          <p class="fine">Planned launch price: $5/month. No payment is being taken.</p>
+          <!-- Deliberately not a link: there is nothing to buy. If a paid tier ever
+               exists, replace this span with the real checkout link. -->
+          <span class="cta" aria-disabled="true" style="opacity:.55;cursor:default">Nothing to buy</span>
+          <p class="fine">No price is set and no payment is being taken.</p>
         </div>
 
       </div>
@@ -219,12 +220,12 @@
   <section>
     <div class="wrap">
       <p class="kicker">Honesty, same as everywhere else on this site</p>
-      <h2>Nothing to buy yet</h2>
+      <h2>Nothing to buy</h2>
       <div class="callout">
-        <b>Pro isn't on sale.</b> There is no checkout, no payment link and no license to
-        buy while ClearToShip is in beta. When Pro launches it will be announced here and
-        in the GitHub README, with how billing works spelled out before you pay anything.
-        The planned launch price is $5/month: one tier, no seats, no usage limits.
+        <b>Nothing here is for sale.</b> There is no checkout, no payment link and no
+        license to buy. If a paid tier ever launches it will be announced here and in the
+        GitHub README, with the price and how billing works spelled out before you pay
+        anything.
       </div>
     </div>
   </section>
@@ -237,20 +238,15 @@
       <div class="faq">
         <div class="qa">
           <h3>Is ClearToShip really free?</h3>
-          <p>Yes. The open-source tool — dependency, secrets and error-handling checks and
-          the community ruleset — is MIT licensed, runs on your machine, and needs no
-          account or key.</p>
+          <p>Yes — all of it, while it is in beta. That includes the Row Level Security,
+          Server Actions and LLM/agent suites. It is MIT licensed, runs on your machine, and
+          needs no account or key.</p>
         </div>
         <div class="qa">
-          <h3>What will Pro add, and when?</h3>
-          <p>The Row Level Security, Server Actions and LLM/agent suites, in the same
-          report. There is no date yet; it isn't on sale and there is nothing to install
-          or configure today.</p>
-        </div>
-        <div class="qa">
-          <h3>Will anything that's free now stop being free?</h3>
-          <p>No. What is free stays free and MIT licensed. Pro would add rules on top; it
-          wouldn't take any away.</p>
+          <h3>Will it stay free?</h3>
+          <p>What is free today stays free and MIT licensed. If a paid tier ever comes, it
+          would be new rules on top, announced before it exists — nothing you already have
+          would move behind it.</p>
         </div>
         <div class="qa">
           <h3>I don't understand what "RLS" or "LLM/agent risk" even means.</h3>

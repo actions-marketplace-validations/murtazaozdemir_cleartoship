@@ -25,9 +25,9 @@ and the coverage table below names the one category this refuses to fake. Everyt
 is the ordinary web surface, which is table stakes: you still ship on the same day that a
 missing RLS policy would have leaked the table.
 
-Those six, and the RLS and Server Actions suites alongside them, are **Pro** — see
-[Free vs Pro](#free-vs-pro) below. Everything else on this page (dependencies,
-secrets, logging/exception handling) is free, forever, no account.
+Those six, the RLS and Server Actions suites alongside them, and everything else on
+this page (dependencies, secrets, logging/exception handling) are free while
+ClearToShip is in beta — no account, no key. See [What's free](#whats-free).
 
 ```bash
 curl -fsSL https://cleartoship.app/cleartoship.mjs -o cleartoship.mjs
@@ -87,31 +87,24 @@ for the version its ref declares, and builds from its own checkout if it cannot.
 
 </details>
 
-## Free vs Pro
+## What's free
 
-`cleartoship` (this package, MIT) always covers the **dependency/supply-chain**,
-**secrets & client bundle**, and **logging, error-handling & deserialization**
-rules below, plus the full vendored community ruleset — free forever, no
-account, no key.
+Everything on this page is free while ClearToShip is in beta: the
+**dependency/supply-chain**, **secrets & client bundle** and **logging,
+error-handling & deserialization** checks, the full vendored community ruleset,
+**and** the Row Level Security, Server Actions and LLM/agent suites. No account,
+no key, nothing to install beyond the one file above.
 
-The **RLS suite**, the **Server Actions suite**, and the **LLM/agent suite** —
-marked 🔒 **Pro** in the tables below — are a separate, proprietary package,
-`cleartoship-rules-pro`, that **is not available yet**. It is not on npm and
-there is nothing to buy or install today (see
-[Pricing](https://cleartoship.app/pricing)). It is deliberately unpublished, so
-treat anything you find on the registry under that name as **not from this
-project**. When it launches it will add those suites to the same report and run
-only with a valid license, verified fully offline (a signed token, checked
-locally) with a periodic best-effort online check for revocation — a flaky
-network never blocks a scan you've already paid for.
+A paid tier may come later, once people are using the tool and it is clear what
+they would pay for. Nothing is for sale today, and no price is set. If it comes,
+what is free now stays free and MIT licensed: a paid tier would be new rules on
+top, announced first, never something taken out of the tier you already have.
 
-Without `cleartoship-rules-pro` installed and licensed, those three suites
-report **nothing** — not even a weaker version. The vendored community rules
-that used to stand in for them were measurably noisier (see
-`SUPERSEDED` in `src/scanners/community.ts`) than the first-party checks they
-were built to replace, and this project's whole premise is that a scanner
-which cries wolf gets ignored. A visible gap you can act on beats a false
-"critical" you learn to distrust.
+The vendored community rules that overlap the first-party RLS, Server Actions and
+LLM/agent checks are switched off in their favour (see `SUPERSEDED` in
+`src/scanners/community.ts`): they were measurably noisier than the checks they
+were built to replace, and this project's whole premise is that a scanner which
+cries wolf gets ignored.
 
 ## What it checks
 
@@ -119,38 +112,38 @@ which cries wolf gets ignored. A visible gap you can act on beats a false
 
 | Rule | Severity | What it catches |
 | --- | --- | --- |
-| 🔒 **CTS001** Pro | critical | Server Action / Route Handler mutates the database with no session check |
-| 🔒 **CTS002** Pro | high | Caller's payload written to the database as an object — every key they sent becomes a column |
-| 🔒 **CTS003** Pro | critical | `SUPABASE_SERVICE_ROLE_KEY` client built inside a user-reachable action |
-| 🔒 **CTS004** Pro | medium | Authenticated mutation keyed only on a caller-supplied id (IDOR) |
+| **CTS001** | critical | Server Action / Route Handler mutates the database with no session check |
+| **CTS002** | high | Caller's payload written to the database as an object — every key they sent becomes a column |
+| **CTS003** | critical | `SUPABASE_SERVICE_ROLE_KEY` client built inside a user-reachable action |
+| **CTS004** | medium | Authenticated mutation keyed only on a caller-supplied id (IDOR) |
 | **CTS040** | high | Client component reads a server-side `process.env` variable |
-| 🔒 **CTS041** Pro | high | `supabase.auth.getSession()` used as a server-side auth check — it does not revalidate the JWT |
-| 🔒 **CTS042** Pro | critical | Webhook endpoint accepts an unsigned, unverified payload |
-| 🔒 **CTS043** Pro | high | Request body spread straight into a database write (mass assignment) |
-| 🔒 **CTS044** Pro | medium | `.passthrough()` / `z.any()` makes the schema decorative |
+| **CTS041** | high | `supabase.auth.getSession()` used as a server-side auth check — it does not revalidate the JWT |
+| **CTS042** | critical | Webhook endpoint accepts an unsigned, unverified payload |
+| **CTS043** | high | Request body spread straight into a database write (mass assignment) |
+| **CTS044** | medium | `.passthrough()` / `z.any()` makes the schema decorative |
 | **CTS045** | critical | AI SDK client set to `dangerouslyAllowBrowser: true` |
-| 🔒 **CTS046** Pro | high | Cron route with neither `CRON_SECRET` nor a session check |
+| **CTS046** | high | Cron route with neither `CRON_SECRET` nor a session check |
 
-CTS040 and CTS045 stay free — they're implemented as part of the secrets
-scanner, not the Server Actions suite.
+CTS040 and CTS045 are implemented in the secrets scanner rather than the Server
+Actions suite.
 
-**Supabase / PostgreSQL** — schema, RLS, storage — 🔒 all Pro
+**Supabase / PostgreSQL** — schema, RLS, storage
 
 | Rule | Severity | What it catches |
 | --- | --- | --- |
-| 🔒 **CTS010** Pro | critical | Public table with Row Level Security never enabled |
-| 🔒 **CTS011** Pro | low | RLS on with no policies — fail-closed, but the feature is probably broken |
-| 🔒 **CTS012** Pro | critical | Policy grants writes with an always-true predicate |
-| 🔒 **CTS013** Pro | high | Anonymous `SELECT` over a table holding emails, tokens or billing ids |
-| 🔒 **CTS014** Pro | high | Table has a `user_id` column but no policy compares it to `auth.uid()` |
-| 🔒 **CTS015** Pro | medium | `SECURITY DEFINER` function without a pinned `search_path` |
-| 🔒 **CTS016** Pro | medium/high | View with definer rights, or a materialized view, exposed over the Data API |
-| 🔒 **CTS017** Pro | critical | `GRANT INSERT/UPDATE/DELETE … TO anon` |
-| 🔒 **CTS018** Pro | critical | Policy trusts `user_metadata`, which the user can edit themselves |
-| 🔒 **CTS019** Pro | critical | `auth.users` republished through a view in the public schema |
-| 🔒 **CTS050** Pro | medium | Overlapping permissive policies — they OR together and only widen access |
-| 🔒 **CTS051** Pro | high | Storage policy lets anyone list every object in every bucket |
-| 🔒 **CTS052** Pro | high | `SECURITY DEFINER` function executable by `anon` |
+| **CTS010** | critical | Public table with Row Level Security never enabled |
+| **CTS011** | low | RLS on with no policies — fail-closed, but the feature is probably broken |
+| **CTS012** | critical | Policy grants writes with an always-true predicate |
+| **CTS013** | high | Anonymous `SELECT` over a table holding emails, tokens or billing ids |
+| **CTS014** | high | Table has a `user_id` column but no policy compares it to `auth.uid()` |
+| **CTS015** | medium | `SECURITY DEFINER` function without a pinned `search_path` |
+| **CTS016** | medium/high | View with definer rights, or a materialized view, exposed over the Data API |
+| **CTS017** | critical | `GRANT INSERT/UPDATE/DELETE … TO anon` |
+| **CTS018** | critical | Policy trusts `user_metadata`, which the user can edit themselves |
+| **CTS019** | critical | `auth.users` republished through a view in the public schema |
+| **CTS050** | medium | Overlapping permissive policies — they OR together and only widen access |
+| **CTS051** | high | Storage policy lets anyone list every object in every bucket |
+| **CTS052** | high | `SECURITY DEFINER` function executable by `anon` |
 
 **Supply chain** — hallucinated and hostile dependencies
 
@@ -181,16 +174,16 @@ reaches a manifest.
 | **CTS033** | critical | `'use client'` component reaching for a server-only secret |
 | **GL-\*** | high/critical | 219 further credential providers, vendored from [gitleaks](https://github.com/gitleaks/gitleaks) (MIT), gated on Shannon entropy |
 
-**LLM & agent risks** — the detectable slices of the OWASP Top 10 for LLM Apps — 🔒 all Pro
+**LLM & agent risks** — the detectable slices of the OWASP Top 10 for LLM Apps
 
 | Rule | Severity | What it catches |
 | --- | --- | --- |
-| 🔒 **CTS080** Pro | high | Caller-supplied text interpolated into the instruction text itself — prompt injection by construction, not by filter (LLM01) |
-| 🔒 **CTS081** Pro | medium | A request-reachable model call with no `max_tokens` ceiling: the answer's length, and its bill, chosen by whoever wrote the input (LLM06) |
-| 🔒 **CTS082** Pro | medium | A system prompt in a `'use client'` module — compiled into the bundle, readable in devtools (LLM08) |
-| 🔒 **CTS083** Pro | high | An agent tool the model may call on its own whose body **cannot be taken back** — deletes rows, moves money, sends mail, runs a shell — with nothing asking a person first (LLM03) |
-| 🔒 **CTS084** Pro | critical/high | The model's own answer traced into a sink that *runs* it: `eval`, `new Function`, a shell, raw SQL, `innerHTML`, `dangerouslySetInnerHTML` (LLM10) |
-| 🔒 **CTS085** Pro | high | A branch or a check that turns on what the model returned — the guess decides access (LLM07) |
+| **CTS080** | high | Caller-supplied text interpolated into the instruction text itself — prompt injection by construction, not by filter (LLM01) |
+| **CTS081** | medium | A request-reachable model call with no `max_tokens` ceiling: the answer's length, and its bill, chosen by whoever wrote the input (LLM06) |
+| **CTS082** | medium | A system prompt in a `'use client'` module — compiled into the bundle, readable in devtools (LLM08) |
+| **CTS083** | high | An agent tool the model may call on its own whose body **cannot be taken back** — deletes rows, moves money, sends mail, runs a shell — with nothing asking a person first (LLM03) |
+| **CTS084** | critical/high | The model's own answer traced into a sink that *runs* it: `eval`, `new Function`, a shell, raw SQL, `innerHTML`, `dangerouslySetInnerHTML` (LLM10) |
+| **CTS085** | high | A branch or a check that turns on what the model returned — the guess decides access (LLM07) |
 
 **Logging, error-handling & deserialization** — the detectable slices of A08/A09/A10
 
@@ -210,9 +203,8 @@ Dockerfiles, Terraform, GitHub Actions pinning, prompt injection and MCP tool
 runtimes, React Native, Go and shell.
 
 27 upstream rules are **superseded** where ClearToShip's own AST check is more
-precise — permanently, whether or not that first-party check is the free tier
-or a licensed Pro one, since the vendored version was the noisier of the two
-either way — 6 are **withheld** as measurably noisy, 10 React Native rules are
+precise — permanently, since the vendored version was the noisier of the two —
+6 are **withheld** as measurably noisy, 10 React Native rules are
 **skipped as inapplicable** on a project that is not React Native, 21 carry a
 **match guard** for a
 shape their regex cannot exclude (a `"link": true` lockfile entry has no
@@ -547,8 +539,8 @@ version, including how to report a vulnerability.
   build you run. ClearToShip never imports a module it finds next to it or in the
   project's `node_modules`, so scanning a repository cannot run that repository's
   code — including a package that happens to be named after this project.
-- **No database connection.** The RLS checks (Pro) read your migration files.
-  There is no database driver in the dependency tree, free or Pro.
+- **No database connection.** The RLS checks read your migration files.
+  There is no database driver in the dependency tree.
 - **Five runtime dependencies.** Three Babel packages, `commander`,
   `picocolors`. The GuardVibe and gitleaks rulesets are vendored into
   `src/vendor/`, not installed, so they are visible in every diff and pinned by
@@ -611,8 +603,8 @@ queries and rule text can be.
 
 ## License
 
-MIT — this package (`cleartoship`), always, including every rule listed above
-as free. `cleartoship-rules-pro` is a separate, proprietary package under its
-own license (see its repo); installing it doesn't change this package's
-license, the same way vendoring GuardVibe and gitleaks under their own
-licenses (`ATTRIBUTION.md`, `LICENSES/`) doesn't either.
+MIT — this package (`cleartoship`), always, including every rule listed above.
+Any paid tier added later would be new rules in a separate package under its own
+license; it would not change what is MIT here, the same way vendoring GuardVibe
+and gitleaks under their own licenses (`ATTRIBUTION.md`, `LICENSES/`) doesn't
+either.
