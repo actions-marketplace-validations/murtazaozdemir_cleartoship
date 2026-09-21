@@ -390,9 +390,10 @@ jobs:
 | `working-directory` | `.` | Directory to scan from |
 | `version` | *(matches the action ref)* | npm version of the scanner to run; `latest` to always track the newest, `local` to build from the checkout |
 
-Outputs `verdict` (`clear`/`conditional`/`hold`), the per-severity counts
-`critical`, `high`, `medium`, `low`, plus `total` and `blocking` (findings at or
-above `fail-on`) for use in later steps. The comment is *sticky* — re-runs edit
+Outputs `verdict` (`clear`/`conditional`/`hold`; `conditional` is also what a
+run gets when a check could not complete, even with no findings), the
+per-severity counts `critical`, `high`, `medium`, `low`, plus `total` and
+`blocking` (findings at or above `fail-on`) for use in later steps. The comment is *sticky* — re-runs edit
 the same comment instead of piling up.
 
 By default the action runs the scanner version its own ref declares, so
@@ -432,8 +433,13 @@ uploaded, and no database is connected to.
 
 ### Design notes
 
-- **Fail open on uncertainty.** If a registry lookup fails, the package is treated as valid —
-  a network blip must never be reported as a hallucinated dependency.
+- **Fail open on uncertainty — and say so.** If a registry lookup fails, the package is treated
+  as valid: a network blip must never be reported as a hallucinated dependency. But a lookup that
+  failed is not a check that passed. The report counts what was actually looked up ("0 of 3
+  packages checked"), says why as a warning, and the verdict is `conditional` — never `clear` —
+  for any run in which a check could not complete (npm/PyPI or OSV unreachable, a scanner that
+  threw, a path that was not there). The JSON `incomplete` array lists the reasons. The exit code
+  still follows `--fail-on`, so an outage does not break your build.
 - **Test fixtures are not breaches.** Credentials under `tests/`, `fixtures/`, `docs/` or in a
   commented-out line are reported at `low`, never as blocking criticals.
 - **Where a file lives changes what a finding costs.** CTS024 already separated a

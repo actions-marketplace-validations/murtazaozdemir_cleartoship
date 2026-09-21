@@ -5,6 +5,22 @@ import type { FullScan } from './scan.js';
 
 const RULE = '─'.repeat(74);
 
+export type Verdict = 'hold' | 'conditional' | 'clear';
+
+/**
+ * The one place the verdict is decided. The terminal report, the JSON, the
+ * Markdown comment and the badge each used to work it out from the counts alone,
+ * so a run in which a check never finished — the registry did not answer, a
+ * scanner threw — came out "clear", because nothing was found. Finding nothing
+ * and not being able to look are different results; only the first is clear.
+ */
+export function verdictOf(scan: Pick<FullScan, 'counts'> & { incomplete?: string[] }): Verdict {
+  if (scan.counts.critical > 0) return 'hold';
+  if (scan.counts.high > 0) return 'conditional';
+  if ((scan.incomplete ?? []).length > 0) return 'conditional';
+  return 'clear';
+}
+
 const SEVERITY_STYLE: Record<Severity, { label: string; paint: (s: string) => string }> = {
   critical: { label: 'CRITICAL', paint: (s) => pc.bold(pc.red(s)) },
   high: { label: 'HIGH    ', paint: pc.red },
@@ -100,6 +116,12 @@ export function renderTerminal(scan: FullScan, opts: { showPassed: boolean } = {
     out.push(`  ${pc.bold(pc.red('VERDICT: 🔴 HOLD — resolve the critical findings before deploying'))}`);
   } else if (blocking > 0) {
     out.push(`  ${pc.bold(pc.yellow('VERDICT: 🟡 CONDITIONAL — no criticals, but high-severity gaps remain'))}`);
+  } else if ((scan.incomplete ?? []).length > 0) {
+    const n = scan.incomplete.length;
+    out.push(
+      `  ${pc.bold(pc.yellow(`VERDICT: 🟡 CONDITIONAL — nothing blocking found, but ${n} check${n === 1 ? '' : 's'} could not complete`))}`,
+    );
+    out.push(pc.dim('  This result is incomplete, not clear: see the WARN lines above for what was not checked.'));
   } else if (total > 0) {
     // Mediums are not "low-priority notes". Saying so about a finding the
     // reader can see is rated medium is the small dishonesty that teaches
@@ -138,12 +160,12 @@ export function renderJson(scan: FullScan): string {
       oversizeCount: scan.oversizeCount,
       skippedDirs: scan.skippedDirs,
       durationMs: scan.durationMs,
-      verdict:
-        scan.counts.critical > 0 ? 'hold' : scan.counts.high > 0 ? 'conditional' : 'clear',
+      verdict: verdictOf(scan),
       counts: scan.counts,
       findings: scan.findings,
       checks: scan.checks,
       warnings: scan.warnings,
+      incomplete: scan.incomplete ?? [],
     },
     null,
     2,
@@ -297,14 +319,16 @@ const MD_SEVERITY: Record<Severity, string> = {
 export function renderMarkdown(scan: FullScan): string {
   const out: string[] = [];
   const total = scan.findings.length;
-  const verdict =
-    scan.counts.critical > 0 ? 'hold' : scan.counts.high > 0 ? 'conditional' : 'clear';
+  const verdict = verdictOf(scan);
+  const notChecked = scan.incomplete ?? [];
 
   const heading =
     verdict === 'hold'
       ? '## 🔴 ClearToShip — hold before shipping'
       : verdict === 'conditional'
-        ? '## 🟡 ClearToShip — clear, with high-severity gaps'
+        ? scan.counts.high > 0
+          ? '## 🟡 ClearToShip — clear, with high-severity gaps'
+          : '## 🟡 ClearToShip — nothing blocking found, but the run is incomplete'
         : total > 0
           ? '## 🟢 ClearToShip — clear to ship'
           : '## 🟢 ClearToShip — clear to ship, all checks passed';
@@ -321,8 +345,18 @@ export function renderMarkdown(scan: FullScan): string {
   );
   out.push('');
 
+  if (notChecked.length > 0) {
+    out.push('> ⚠️ **Not everything could be checked — treat this result as incomplete:**');
+    for (const reason of notChecked) out.push(`> - ${mdSafe(reason)}`);
+    out.push('');
+  }
+
   if (total === 0) {
-    out.push('No security findings. ✅');
+    out.push(
+      notChecked.length > 0
+        ? 'No findings in what could be checked.'
+        : 'No security findings. ✅',
+    );
     out.push('');
     out.push('<sub>Static pre-flight for AI-built apps · [cleartoship.app](https://cleartoship.app)</sub>');
     return out.join('\n');
@@ -380,8 +414,7 @@ export function renderMarkdown(scan: FullScan): string {
 }
 
 export function renderBadge(scan: FullScan): string {
-  const verdict =
-    scan.counts.critical > 0 ? 'hold' : scan.counts.high > 0 ? 'conditional' : 'clear';
+  const verdict = verdictOf(scan);
   const colour = verdict === 'clear' ? '10b981' : verdict === 'conditional' ? 'f59e0b' : 'ef4444';
   const label = verdict === 'clear' ? 'clear%20to%20ship' : verdict;
   return `[![ClearToShip](https://img.shields.io/badge/ClearToShip-${label}-${colour}?style=flat-square)](https://cleartoship.app)`;

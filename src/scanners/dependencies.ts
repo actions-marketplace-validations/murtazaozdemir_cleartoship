@@ -447,10 +447,18 @@ export const dependencyScanner: Scanner = {
     const registry = new Registry(ctx.cacheDir, ctx.offline);
     const facts = await pool(list, 8, (d) => registry.lookup(d.name, d.ecosystem));
 
-    if (registry.networkErrors > 0) {
-      result.warnings.push(
-        `${registry.networkErrors} registry lookup(s) failed; those packages were treated as valid.`,
-      );
+    // A lookup that failed is not a package that exists. This stays fail-open, so a
+    // network blip is never reported as a hallucinated dependency, but it must not
+    // be reported as *checked* either: a run where the registry never answered used
+    // to end "all checks passed" with a one-line warning above it.
+    const unverified = facts.filter((f) => f.error && f.error !== 'offline').length;
+    if (unverified > 0) {
+      result.incomplete = [
+        ...(result.incomplete ?? []),
+        `${unverified} of ${list.length} package${list.length === 1 ? '' : 's'} could not be looked up ` +
+          'on npm/PyPI (the registry did not answer), so they were NOT checked — a hallucinated, ' +
+          'typosquatted or newly registered name among them would not be reported.',
+      ];
     }
 
     list.forEach((d, i) => {
@@ -640,9 +648,11 @@ export const dependencyScanner: Scanner = {
     if (osvQueries.length > 0) {
       const { results: vulnResults, failed } = await queryOsv(osvQueries);
       if (failed) {
-        result.warnings.push(
-          'OSV.dev lookup failed; known-vulnerability results are incomplete for this run.',
-        );
+        result.incomplete = [
+          ...(result.incomplete ?? []),
+          'OSV.dev did not answer, so the versions you depend on were NOT checked for known ' +
+            'vulnerabilities in this run.',
+        ];
       } else {
         osvChecked = osvQueries.length;
       }
@@ -739,9 +749,15 @@ export const dependencyScanner: Scanner = {
       ['CTS020', 'CTS026', 'CTS027'].includes(f.id),
     ).length;
     const notes = missing > 0 ? [`${missing} could not be resolved`, ...skipNotes] : [...skipNotes];
+    if (unverified > 0) notes.push(`${unverified} not verified — registry did not answer`);
+    const checked = list.length - unverified;
     result.checks.push({
-      label: `Dependency verification (${list.length} package${list.length === 1 ? '' : 's'} checked against npm/PyPI)`,
-      passed: missing === 0,
+      // Says how many were actually looked up, not how many were asked about.
+      label:
+        unverified > 0
+          ? `Dependency verification (${checked} of ${list.length} package${list.length === 1 ? '' : 's'} checked against npm/PyPI)`
+          : `Dependency verification (${list.length} package${list.length === 1 ? '' : 's'} checked against npm/PyPI)`,
+      passed: missing === 0 && unverified === 0,
       note: notes.length > 0 ? notes.join('; ') : undefined,
     });
     return result;

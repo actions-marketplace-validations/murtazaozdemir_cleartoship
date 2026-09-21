@@ -41,6 +41,12 @@ export interface FullScan {
   findings: Finding[];
   checks: CheckSummary[];
   warnings: string[];
+  /**
+   * Checks that could not finish (registry unreachable, a scanner that threw, a
+   * path that was not there). Each is also in `warnings`. Any entry means the
+   * result is incomplete, so the verdict is never "clear".
+   */
+  incomplete: string[];
   counts: Record<Severity, number>;
   durationMs: number;
 }
@@ -90,9 +96,11 @@ export async function scan(options: ScanOptions): Promise<FullScan> {
 
   const findings: Finding[] = [];
   const checks: CheckSummary[] = [];
-  const warnings: string[] = missingRoots.map(
+  const missingRootNotes = missingRoots.map(
     (r) => `${r} does not exist; nothing there was scanned.`,
   );
+  const warnings: string[] = [...missingRootNotes];
+  const incomplete: string[] = [...missingRootNotes];
 
   for (let i = 0; i < activeAll.length; i++) {
     const scanner = activeAll[i]!;
@@ -102,10 +110,16 @@ export async function scan(options: ScanOptions): Promise<FullScan> {
       findings.push(...result.findings);
       checks.push(...result.checks);
       warnings.push(...result.warnings);
+      // Reported once as a warning and once as a reason the verdict is not clear.
+      const notVerified = result.incomplete ?? [];
+      warnings.push(...notVerified);
+      incomplete.push(...notVerified);
     } catch (err) {
-      warnings.push(
-        `${scanner.name} failed: ${err instanceof Error ? err.message : String(err)}`,
-      );
+      // A scanner that threw produced no findings, which is not the same thing as
+      // finding nothing.
+      const reason = `${scanner.name} failed: ${err instanceof Error ? err.message : String(err)}`;
+      warnings.push(reason);
+      incomplete.push(reason);
     }
   }
 
@@ -210,6 +224,7 @@ export async function scan(options: ScanOptions): Promise<FullScan> {
     findings: filtered,
     checks,
     warnings,
+    incomplete,
     counts,
     durationMs: Date.now() - started,
   };

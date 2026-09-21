@@ -70,7 +70,15 @@ jobs:
           offline: 'true'
           comment: 'true'
           version: latest
+      # npm is an optional backup channel, so this canary only runs once it is
+      # switched on (`gh variable set PUBLISH_TO_NPM --body true`, the same switch
+      # release.yml uses). Left unconditional it failed every pull request while the
+      # package is off the registry — and it runs `npx --yes cleartoship@latest`,
+      # which executes whatever the registry serves under that name. While the name
+      # is unclaimed, anyone who registers it would get code execution in this job,
+      # which holds `pull-requests: write`.
       - name: Assert the published package is installable at all
+        if: vars.PUBLISH_TO_NPM == 'true'
         run: |
           # Asked directly rather than through the action, because the action now
           # prefers the release bundle and would no longer touch npm on a healthy

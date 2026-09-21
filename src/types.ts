@@ -43,6 +43,15 @@ export interface ScanResult {
   checks: CheckSummary[];
   /** Non-fatal problems: unreadable file, registry offline, etc. */
   warnings: string[];
+  /**
+   * Reasons this scanner could not finish checking something it was asked to
+   * check — a registry that would not answer, a lookup service that failed.
+   * A warning is information; this changes what the result means: with any of
+   * these present, "no findings" is not "nothing wrong", so the run is never
+   * reported as clear. Optional so a companion package built against an older
+   * ScanResult keeps working.
+   */
+  incomplete?: string[];
 }
 
 export interface ProjectContext {
@@ -79,5 +88,5 @@ export interface Scanner {
 }
 
 export function emptyResult(): ScanResult {
-  return { findings: [], checks: [], warnings: [] };
+  return { findings: [], checks: [], warnings: [], incomplete: [] };
 }

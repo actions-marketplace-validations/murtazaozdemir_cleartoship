@@ -7,6 +7,8 @@ export {
   renderFixPrompt,
   renderBadge,
   renderMarkdown,
+  verdictOf,
 } from './report.js';
+export type { Verdict } from './report.js';
 export { SCANNERS } from './scanners/index.js';
 export * from './types.js';

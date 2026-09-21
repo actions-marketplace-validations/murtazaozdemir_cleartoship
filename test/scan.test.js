@@ -937,6 +937,77 @@ test('a path that does not exist is reported, not silently empty', async () => {
     result.warnings.some((w) => w.includes('does not exist')),
     'a missing path must not read as a clean scan',
   );
+  // A warning is not enough: the verdict is what a CI gate and a badge read.
+  const { verdictOf } = await import('../dist/report.js');
+  assert.equal(verdictOf(result), 'conditional', 'nothing was scanned, so it cannot be "clear"');
+});
+
+test('the verdict is decided in one place, and an incomplete run is never clear', async () => {
+  const { verdictOf } = await import('../dist/report.js');
+  const counts = (over = {}) => ({ critical: 0, high: 0, medium: 0, low: 0, info: 0, ...over });
+
+  assert.equal(verdictOf({ counts: counts(), incomplete: [] }), 'clear');
+  assert.equal(verdictOf({ counts: counts({ low: 4, medium: 2 }), incomplete: [] }), 'clear');
+  assert.equal(verdictOf({ counts: counts({ high: 1 }), incomplete: [] }), 'conditional');
+  assert.equal(verdictOf({ counts: counts({ critical: 1 }), incomplete: [] }), 'hold');
+  // Nothing found, but something could not be looked at: not clear.
+  assert.equal(verdictOf({ counts: counts(), incomplete: ['registry did not answer'] }), 'conditional');
+  // A finding always outranks an incomplete run.
+  assert.equal(verdictOf({ counts: counts({ critical: 1 }), incomplete: ['x'] }), 'hold');
+  // A result from before the field existed still reads correctly.
+  assert.equal(verdictOf({ counts: counts() }), 'clear');
+});
+
+test('when the registry does not answer, the run says it did not check — it does not say "all checks passed"', async () => {
+  // The real failure: with npmjs.com unreachable, a project depending on two
+  // packages that do not exist scanned "clear to ship — all checks passed", and the
+  // dependency check still read "2 packages checked". Fail-open stays (a network
+  // blip must never be reported as a hallucinated package); claiming it checked
+  // does not.
+  const { verdictOf, renderTerminal, renderJson, renderMarkdown } = await import('../dist/report.js');
+  const root = await tempProject({
+    'package.json': JSON.stringify({
+      name: 'x',
+      version: '1.0.0',
+      dependencies: { 'react-hot-toast-notifications': '1.0.0', 'tailwind-modal-components': '1.0.0' },
+    }),
+  });
+  const { mkdtempSync } = await import('node:fs');
+  const { tmpdir } = await import('node:os');
+  const cache = mkdtempSync(join(tmpdir(), 'cts-cache-'));
+
+  const realFetch = globalThis.fetch;
+  const realCache = process.env.CLEARTOSHIP_CACHE;
+  globalThis.fetch = () => Promise.reject(new TypeError('fetch failed (simulated: registry unreachable)'));
+  process.env.CLEARTOSHIP_CACHE = cache; // an earlier real answer must not mask the outage
+  let result;
+  try {
+    result = await scan({ root, noCommunity: true });
+  } finally {
+    globalThis.fetch = realFetch;
+    if (realCache === undefined) delete process.env.CLEARTOSHIP_CACHE;
+    else process.env.CLEARTOSHIP_CACHE = realCache;
+  }
+
+  // Still fail-open: an unreachable registry is not evidence the packages are fake.
+  assert.equal(result.findings.filter((f) => f.id === 'CTS020').length, 0);
+
+  const reason = result.incomplete.find((r) => /looked up on npm\/PyPI/.test(r));
+  assert.ok(reason, 'the outage must be recorded as an incomplete check');
+  assert.match(reason, /^2 of 2 packages/);
+  assert.ok(result.warnings.includes(reason), 'and still shown as a warning');
+
+  const check = result.checks.find((c) => c.label.startsWith('Dependency verification'));
+  assert.equal(check.label, 'Dependency verification (0 of 2 packages checked against npm/PyPI)');
+  assert.equal(check.passed, false, 'a check that looked at nothing has not passed');
+
+  assert.equal(verdictOf(result), 'conditional');
+  const text = renderTerminal(result);
+  assert.ok(!text.includes('all checks passed'), 'the terminal verdict must not claim a clean run');
+  assert.ok(!/✔ PASS\s+Dependency verification/.test(text), 'and must not list the check as passed');
+  assert.match(text, /could not complete/);
+  assert.equal(JSON.parse(renderJson(result)).verdict, 'conditional');
+  assert.match(renderMarkdown(result), /Not everything could be checked/);
 });
 
 test('the walk says what it left unread', async () => {
