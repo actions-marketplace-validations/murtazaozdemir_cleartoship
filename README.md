@@ -38,8 +38,9 @@ node cleartoship.mjs
 reports to your terminal — nothing leaves it either way.
 
 That is one bundled file with zero dependencies: no package manager in the path
-and nothing for a registry to resolve. `npx cleartoship` does **not** work right
-now — the package is not on npm. The same file is attached to every
+and nothing for a registry to resolve. **ClearToShip is not distributed through
+npm.** There is no `npx cleartoship`, and a package by that name on the registry is
+not from this project — do not run it. The same file is attached to every
 [GitHub release](https://github.com/murtazaozdemir/cleartoship/releases/latest)
 if you would rather not fetch it from this domain
 (`https://github.com/murtazaozdemir/cleartoship/releases/latest/download/cleartoship.mjs`),
@@ -55,13 +56,10 @@ rather than approximated, since a looser `>=22.18` would claim Node 23 and early
 24 work when they do not.
 
 <details>
-<summary>Why there are three install paths</summary>
+<summary>Other ways to install</summary>
 
-`npx cleartoship` is the usual one once the package is on npm — it is not right
-now. Two others exist so that a registry or account problem cannot take the tool
-offline, which is not hypothetical:
-
-Ranked by how little has to work for them to work:
+None of these fetches ClearToShip itself from the npm registry. Ranked by how
+little has to work for them to work:
 
 ```bash
 # 1. nothing but node. No package manager, no registry, no install step.
@@ -76,20 +74,16 @@ npm i -D https://github.com/murtazaozdemir/cleartoship/releases/latest/download/
 # 3. from the repository, building on install. npm 12 defaults allow-git to
 #    "none" too, and the build is a lifecycle script, so both need allowing.
 npm i -D github:murtazaozdemir/cleartoship --allow-git=all --allow-scripts=cleartoship
-
-# 4. the registry
-npx cleartoship
 ```
 
 1 and 2 are the same bundled file, and the test suite asserts it produces
-identical findings to the published package — a fallback that behaves
-differently from the tool you tested is not a fallback. 3 still resolves the
-five runtime dependencies from npm; what it removes is any dependency on *this
-package* being published. Only 4 needs npmjs.com to be serving.
+identical findings to the full package — a fallback that behaves differently from
+the tool you tested is not a fallback. 3 still resolves the five runtime
+dependencies from npm; what it removes is any need for *this package* to be
+published there.
 
-The GitHub Action needs neither. `action.yml` falls back to building from its own
-checkout when the published version cannot be resolved, so
-`uses: murtazaozdemir/cleartoship@vX.Y.Z` keeps working either way.
+The GitHub Action needs none of them: `action.yml` downloads the release bundle
+for the version its ref declares, and builds from its own checkout if it cannot.
 
 </details>
 
@@ -307,9 +301,7 @@ now CTS085.
 
 ## Usage
 
-Every command below runs the standalone file from the install step above. If you
-have the package installed from a registry instead, `npx cleartoship` takes the
-same flags.
+Every command below runs the standalone file from the install step above.
 
 ```bash
 node cleartoship.mjs                     # scan the whole project
@@ -388,7 +380,7 @@ jobs:
 | `sarif` | `false` | Upload results to GitHub code scanning |
 | `offline` | `false` | Skip registry and OSV lookups |
 | `working-directory` | `.` | Directory to scan from |
-| `version` | *(matches the action ref)* | npm version of the scanner to run; `latest` to always track the newest, `local` to build from the checkout |
+| `version` | *(matches the action ref)* | Release to run: a version number, `latest` for the newest release, or `local` to build from the checkout |
 
 Outputs `verdict` (`clear`/`conditional`/`hold`; `conditional` is also what a
 run gets when a check could not complete, even with no findings), the
@@ -396,10 +388,11 @@ per-severity counts `critical`, `high`, `medium`, `low`, plus `total` and
 `blocking` (findings at or above `fail-on`) for use in later steps. The comment is *sticky* — re-runs edit
 the same comment instead of piling up.
 
-By default the action runs the scanner version its own ref declares, so
-`@v0.13.6` runs `cleartoship@0.13.6` and pinning the ref pins the behaviour. If
-that version is not on the registry, it builds from its own checkout instead, so
-`uses: …@ref` works against an unpublished commit.
+By default the action runs the release bundle for the version its own ref
+declares, so `@v0.13.6` runs ClearToShip 0.13.6 and pinning the ref pins the
+behaviour. If that release has no bundle, it builds from its own checkout
+instead, so `uses: …@ref` works against an unreleased commit. It never fetches or
+runs anything from the npm registry under ClearToShip's name.
 
 ## How it works
 
@@ -565,6 +558,11 @@ version, including how to report a vulnerability.
   construction.
 
 ## Programmatic use
+
+The library API needs the package itself, which is attached to each GitHub
+release as `cleartoship-<version>.tgz` (the standalone bundle above is the CLI
+only). Install that file with `npm i -D ./cleartoship-<version>.tgz`; its five
+runtime dependencies still come from npm.
 
 ```ts
 import { scan, renderJson } from 'cleartoship';

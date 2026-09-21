@@ -51,10 +51,10 @@ jobs:
           test "${{ steps.scan.outputs.total }}" = "0" || { echo "expected zero findings, got ${{ steps.scan.outputs.total }}"; exit 1; }
           echo "clean fixture: clear to ship"
 
-  # The path real consumers actually take: the published npm package, plus the
-  # sticky PR comment. Neither is covered by the jobs above — they pin
-  # `version: local`, and the comment step only fires on pull_request — so a
-  # broken publish or a broken comment would have looked green indefinitely.
+  # The path real consumers actually take: the release bundle, plus the sticky PR
+  # comment. Neither is covered by the jobs above — they pin `version: local`, and
+  # the comment step only fires on pull_request — so a broken release or a broken
+  # comment would have looked green indefinitely.
   published-and-comment:
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
@@ -70,36 +70,29 @@ jobs:
           offline: 'true'
           comment: 'true'
           version: latest
-      # npm is an optional backup channel, so this canary only runs once it is
-      # switched on (`gh variable set PUBLISH_TO_NPM --body true`, the same switch
-      # release.yml uses). Left unconditional it failed every pull request while the
-      # package is off the registry — and it runs `npx --yes cleartoship@latest`,
-      # which executes whatever the registry serves under that name. While the name
-      # is unclaimed, anyone who registers it would get code execution in this job,
-      # which holds `pull-requests: write`.
-      - name: Assert the published package is installable at all
-        if: vars.PUBLISH_TO_NPM == 'true'
+      # The Action must run the GitHub release bundle, not fall back to building from
+      # the checkout. `resolved` is the output that says which ran, and without this
+      # the job would stay green even if every release download quietly failed.
+      # There is deliberately no check that `npx cleartoship` works: ClearToShip is
+      # not published on npm, and `npx --yes` would run whatever the registry serves
+      # under that unclaimed name, in a job that holds `pull-requests: write`.
+      - name: Assert it ran the release bundle
         run: |
-          # Asked directly rather than through the action, because the action now
-          # prefers the release bundle and would no longer touch npm on a healthy
-          # run. This is the canary for `npx cleartoship`, which is a documented
-          # install path whether or not the action uses it — and which is exactly
-          # what was quietly broken while this job reported success.
-          npx --yes cleartoship@latest --version || {
-            echo "::error::npx cleartoship@latest does not run. The package is not"
-            echo "::error::installable from the registry, which breaks a documented"
-            echo "::error::install path even though the Action itself is unaffected."
+          test "${{ steps.scan.outputs.resolved }}" = "release" || {
+            echo "::error::expected resolved=release, got '${{ steps.scan.outputs.resolved }}'."
+            echo "::error::The Action fell back to a checkout build, so the release download"
+            echo "::error::path that real consumers take was not the one graded."
             exit 1
           }
 
-      - name: Assert the published package returns a clean verdict
+      - name: Assert the release build returns a clean verdict
         run: |
           test "${{ steps.scan.outputs.verdict }}" = "clear" || {
-            echo "published cleartoship@latest did not report the clean fixture as clear"
+            echo "the latest release did not report the clean fixture as clear"
             echo "verdict=${{ steps.scan.outputs.verdict }} total=${{ steps.scan.outputs.total }}"
             exit 1
           }
-          echo "published package: clear to ship"
+          echo "release build: clear to ship"
       - name: Assert the sticky comment landed exactly once
         env:
           GH_TOKEN: ${{ github.token }}

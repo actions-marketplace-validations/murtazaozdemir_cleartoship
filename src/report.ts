@@ -141,7 +141,7 @@ export function renderTerminal(scan: FullScan, opts: { showPassed: boolean } = {
 
   if (total > 0) {
     out.push('');
-    out.push(`  ${pc.dim('Hand the fixes to your AI editor:')}  ${pc.cyan('npx cleartoship --fix-prompt')}`);
+    out.push(`  ${pc.dim('Hand the fixes to your AI editor:')}  ${pc.cyan('re-run with --fix-prompt')}`);
   }
   out.push('');
   return out.join('\n');
@@ -274,7 +274,7 @@ export function renderFixPrompt(scan: FullScan): string {
   lines.push('---');
   lines.push('');
   lines.push(
-    'When you are done, re-run `npx cleartoship` and confirm the findings above are gone ' +
+    'When you are done, re-run ClearToShip the way you ran it before and confirm the findings above are gone ' +
       'and no new ones appeared.',
   );
   lines.push('');
@@ -407,7 +407,7 @@ export function renderMarkdown(scan: FullScan): string {
     out.push('');
   }
 
-  out.push('Run `npx cleartoship --fix-prompt` for a prompt that fixes all of these in Cursor or Claude Code.');
+  out.push('Re-run with `--fix-prompt` for a prompt that fixes all of these in Cursor or Claude Code.');
   out.push('');
   out.push('<sub>Static pre-flight for AI-built apps · [cleartoship.app](https://cleartoship.app)</sub>');
   return out.join('\n');

@@ -9,12 +9,14 @@ repository. Install from
 [cleartoship.app](https://cleartoship.app/cleartoship.mjs)
 (`curl -fsSL https://cleartoship.app/cleartoship.mjs -o cleartoship.mjs && node cleartoship.mjs`);
 the same file is on [the GitHub release](https://github.com/murtazaozdemir/cleartoship/releases/latest).
-**Not on npm.** The package was unpublished from npmjs.com on 2026-09-03 and the
-`NPM_TOKEN` secret has returned 401 since, so `npx cleartoship` does not resolve.
-`deploy-site.yml` serves the release's standalone build from the domain and
-compares its hash with the release asset after every deploy. The `cleartoship`
-name on npm is currently unclaimed. Writing this down rather than leaving the
-line saying "npm `latest`", which it did, and which was not true._
+**Not distributed through npm, by decision (2026-09-21):** the maintainer can no
+longer use npmjs.com. The package was unpublished on 2026-09-03 and the name is
+unclaimed, so anything on the registry under it is **not from this project**:
+the docs say so, and the Action and CI no longer run or recommend it.
+`release.yml`'s npm publish steps remain but are off unless the repository
+variable `PUBLISH_TO_NPM` is `true`. `deploy-site.yml` serves the release's
+standalone build from the domain and compares its hash with the release asset
+after every deploy._
 _v0.13.0 and earlier published **unsigned** — npm's registry refuses provenance
 from a private source repo. The repository is public now, and `release.yml`
 reads its visibility, so 0.13.1 is the first release signed with provenance._
@@ -78,7 +80,7 @@ them found a credential-shaped literal in a comment written the same afternoon.
       `marketplace` field on the release object and `/marketplace_listing` is not
       writable, because publishing means **accepting the GitHub Marketplace
       Developer Agreement**. That is a legal acceptance, so it has to be done by
-      hand on the release page. The `npx cleartoship` recipe in the README works
+      hand on the release page. The `curl … cleartoship.mjs` recipe in the README works
       everywhere regardless, and on any CI, not just GitHub.
 - [ ] **A user who is not me.** *The one that actually matters.* Every
       calibration decision so far has been made against my own six repositories,
@@ -104,6 +106,13 @@ them found a credential-shaped literal in a comment written the same afternoon.
   this. Revisit then rather than on a date.
 
 ## Settled
+
+- **No npm distribution, as of 2026-09-21.** ClearToShip ships as a GitHub Release
+  plus `cleartoship.app/cleartoship.mjs`. The Action resolves the release bundle,
+  then a checkout build, and never `npx`es the name — with the name unclaimed, that
+  would be code execution for whoever registered it. The scanner still *queries*
+  the npm registry, because checking a user's dependencies against it is the
+  feature; when it cannot, the run says so and is never "clear".
 
 - **Node floor: `^22.18.0 || >=24.11.0`,** as of 0.13.2. That is Babel 8's own
   range copied exactly rather than approximated — a looser `>=22.18` would claim

@@ -28,9 +28,9 @@ inputs:
     default: 'false'
   version:
     description: >-
-      Version of the cleartoship npm package to run. Defaults to the version this
-      action's own ref declares, so `uses: …@v0.13.6` runs cleartoship@0.13.6. Set
-      `latest` to always track the newest release, or `local` to build from the checkout.
+      Release of ClearToShip to run: a version number, `latest` for the newest
+      release, or `local` to build from the checkout. Defaults to the version this
+      action's own ref declares, so `uses: …@v0.13.6` runs 0.13.6.
     required: false
     default: ''
   working-directory:
@@ -46,9 +46,9 @@ outputs:
   resolved:
     description: >-
       Which scanner actually ran: `release` (the standalone bundle from the
-      GitHub release, no registry involved), `npm` (the published package), or
-      `checkout` (built from this action's own source). Tried in that order; the
-      action works either way, and this says which.
+      GitHub release, no registry involved) or `checkout` (built from this
+      action's own source). Tried in that order; the action works either way,
+      and this says which.
     value: ${{ steps.resolve.outputs.resolved }}
   verdict:
     description: One of clear, conditional, or hold.
@@ -84,7 +84,7 @@ runs:
         # With no version pinned, run the exact version this action's checkout
         # declares. That keeps the action ref and the scanner in lockstep:
         # pinning `uses: <owner>/cleartoship@vX.Y.Z` runs cleartoship@X.Y.Z
-        # instead of whatever npm happens to tag `latest` at the time. Written
+        # instead of whatever happens to be newest at the time. Written
         # without a literal version on purpose: this line has twice been left
         # stating the previous release during a bump.
         ver="$INPUT_VERSION"
@@ -93,19 +93,22 @@ runs:
           echo "No version pinned; matching this action's checkout: ${ver}"
         fi
 
-        # Order is deliberate, and npm is last on purpose. The release asset is a
-        # single bundled file with no dependencies, so it needs nothing but a
-        # download; npx and a checkout build both need the registry to answer, for
-        # this package or for the five it depends on. This project has been on the
-        # wrong side of that twice in one week - the package was unpublished out from
-        # under it, and npm 12 now refuses remote and git installs by default - so the
-        # Action does not lead with the link most likely to be missing.
+        # There is no npm branch, on purpose. This project is not published on npm,
+        # so a package named `cleartoship` on the registry is not ours, and running
+        # one would execute whatever a stranger registered under an unclaimed name,
+        # in a job that can hold a write token. The release asset is a single
+        # bundled file with no dependencies, so it needs nothing but a download, and
+        # the checkout build is this action's own source.
         #
         # `resolved` is reported because otherwise the fallback is invisible: the
         # Action works whichever path runs, which is the point, but a test claiming
-        # "the published package is fine" could not tell it had graded something else.
+        # "the release build is fine" could not tell it had graded something else.
         repo=$(node -p "require('${GITHUB_ACTION_PATH}/package.json').repository.url.replace(/^git\+/,'').replace(/\.git$/,'')")
-        asset="${repo}/releases/download/v${ver}/cleartoship.mjs"
+        if [ "$ver" = "latest" ]; then
+          asset="${repo}/releases/latest/download/cleartoship.mjs"
+        else
+          asset="${repo}/releases/download/v${ver}/cleartoship.mjs"
+        fi
         bundle="${RUNNER_TEMP}/cleartoship-${ver}.mjs"
 
         if [ "$ver" = "local" ]; then
@@ -116,13 +119,9 @@ runs:
         elif curl -fsSL --retry 2 "$asset" -o "$bundle" && node "$bundle" --version >/dev/null 2>&1; then
           echo "cmd=node ${bundle}" >> "$GITHUB_OUTPUT"
           echo "resolved=release" >> "$GITHUB_OUTPUT"
-          echo "Using the standalone bundle from release v${ver} - no registry involved."
-        elif npm view "cleartoship@${ver}" version >/dev/null 2>&1; then
-          echo "cmd=npx --yes cleartoship@${ver}" >> "$GITHUB_OUTPUT"
-          echo "resolved=npm" >> "$GITHUB_OUTPUT"
-          echo "No release asset for v${ver}; using the published npm package."
+          echo "Using the standalone bundle from release ${ver} - no registry involved."
         else
-          echo "Neither a release asset nor a published package for ${ver}; building from the checkout."
+          echo "No release bundle for ${ver}; building from the checkout."
           ( cd "$GITHUB_ACTION_PATH" && npm ci --silent && npm run build --silent )
           echo "cmd=node ${GITHUB_ACTION_PATH}/dist/cli.js" >> "$GITHUB_OUTPUT"
           echo "resolved=checkout" >> "$GITHUB_OUTPUT"

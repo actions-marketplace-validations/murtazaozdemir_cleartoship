@@ -15,12 +15,21 @@ weird file — belong in a normal issue.
 Fixes ship in a patch release. The `latest` published version is the only
 supported one; older versions are not backported.
 
+## Where to get it — and where not to
+
+ClearToShip is distributed through [cleartoship.app](https://cleartoship.app) and
+the [GitHub releases](https://github.com/murtazaozdemir/cleartoship/releases) of
+this repository, and nowhere else. **It is not published on npm.** A package named
+`cleartoship` (or `cleartoship-rules-pro`) on the npm registry did not come from
+this project: do not `npx` it or install it, and report it through the private
+vulnerability reporting above. `SHA256SUMS` on cleartoship.app lists the checksum
+of the downloadable file.
+
 ## What it does to your project
 
 **You do not need access to the source repository to check any of this.** The
 package tarball attached to each GitHub release contains the code that actually
-runs (once the package is on npm, `npm pack cleartoship` gives you the same
-thing):
+runs:
 
 ```bash
 gh release download -R murtazaozdemir/cleartoship -p 'cleartoship-[0-9]*.tgz' \

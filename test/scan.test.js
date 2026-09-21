@@ -735,9 +735,16 @@ test('the shipped GitHub Action is structurally sound', () => {
   const yml = readFileSync(join(here, '..', 'action.yml'), 'utf8');
   assert.ok(!/\t/.test(yml), 'YAML must not contain tabs');
   assert.match(yml, /using: composite/);
-  // The two runner paths the action can take.
-  assert.match(yml, /npx --yes cleartoship@/, 'should prefer the published package');
+  // The two runner paths the action can take: the release bundle, then a local build.
+  assert.match(yml, /releases\/download\/v\$\{ver\}\/cleartoship\.mjs/, 'should prefer the release bundle');
+  assert.match(yml, /releases\/latest\/download\/cleartoship\.mjs/, '`latest` resolves through GitHub releases');
   assert.match(yml, /node \$\{GITHUB_ACTION_PATH\}\/dist\/cli\.js/, 'should fall back to a local build');
+  // ClearToShip is not published on npm, so a package by its name on the registry
+  // is not ours. The action must never fetch or run one: with `version: latest`
+  // and an unclaimed name, that would be code execution for whoever registers it.
+  const code = yml.replace(/^\s*#.*$/gm, '');
+  assert.ok(!/npx\s+(--yes\s+)?cleartoship/.test(code), 'the action must not npx the cleartoship package');
+  assert.ok(!/npm\s+(view|install|i)\s+\S*cleartoship/.test(code), 'the action must not resolve cleartoship from npm');
   // Balanced GitHub expression braces.
   const opens = (yml.match(/\$\{\{/g) || []).length;
   const closes = (yml.match(/\}\}/g) || []).length;
