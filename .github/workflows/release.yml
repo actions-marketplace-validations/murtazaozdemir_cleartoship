@@ -1,21 +1,22 @@
 name: Release
 
-# Tagging is the release. Publishing by hand is what let package.json reach
-# 0.8.0 while npm still served 0.7.0 — and because the action resolves the npm
-# package, that drift silently changed what every consumer actually ran.
+# Tagging is the release: a GitHub Release with the bundle attached, and
+# cleartoship.app serving that same file. ClearToShip is not published on npm, so
+# nothing here publishes to a registry. Publishing by hand is what let package.json
+# reach 0.8.0 while the distributed build was still 0.7.0, so the version that
+# ships must be the version in the tag.
 on:
   push:
     tags: ['v*']
 
-# Releases queue, never cancel. Interrupting a publish mid-flight is how you get
-# a version that is half on the registry.
+# Releases queue, never cancel. Interrupting one mid-flight is how you get a
+# release with half its assets attached.
 concurrency:
   group: release-${{ github.ref }}
   cancel-in-progress: false
 
 permissions:
   contents: write   # for the GitHub Release
-  id-token: write   # for the Sigstore OIDC token that signs provenance
   actions: write    # to dispatch the site deploy that serves this release
 
 jobs:
@@ -27,7 +28,6 @@ jobs:
         with:
           node-version: 22
           cache: npm
-          registry-url: https://registry.npmjs.org
 
       - name: Tag must match package.json
         run: |
@@ -59,23 +59,18 @@ jobs:
           action.yml package.json README.md SECURITY.md ATTRIBUTION.md TODO.md
           --fail-on=critical
 
-      # Ahead of the npm publish, deliberately. This step used to be last, so
-      # when the token check failed the GitHub Release was skipped with it —
-      # and the one distribution channel that does not depend on npm was left
-      # hostage to npm succeeding. v0.13.5 tagged, failed at the token, and
-      # left a bare tag with nothing anyone could download.
-      #
-      # Idempotent, because the whole point is that this tag gets re-run once
-      # the token is fixed: `gh release create` on an existing release is an
-      # error, so an existing one gets the asset re-uploaded instead.
+      # Idempotent, so a tag can be re-run without a new version number:
+      # `gh release create` on an existing release is an error, so an existing one
+      # gets its assets re-uploaded instead.
       - name: Create the GitHub Release and attach the tarball
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           # Two artifacts, and they are not the same thing.
           #
-          # cleartoship-X.Y.Z.tgz is the npm package: the module tree, five
-          # runtime dependencies, identical to what the registry serves.
+          # cleartoship-X.Y.Z.tgz is the full package (`npm pack`): the module tree
+          # and the library API, for anyone who wants `import { scan }`. Its five
+          # runtime dependencies are installed from the registry by whoever uses it.
           #
           # cleartoship-standalone.tgz is one bundled file with no dependencies
           # at all, so it installs when the registry cannot resolve anything.
@@ -109,110 +104,36 @@ jobs:
           echo "Runs with no package manager involved:"
           echo "  curl -fsSL ${base}/cleartoship.mjs -o cleartoship.mjs && node cleartoship.mjs"
 
-      # Also ahead of the npm steps, for the same reason as the release above: they
-      # fail while npm is broken, and this must not wait on them. The site fetches
-      # this release's standalone build at deploy time, so it has to be redeployed
-      # once the release exists.
+      # A green step is not a shipped artifact: check the release itself. It must carry
+      # all three assets, and the bundle attached to it must run and report the version
+      # this tag declares. This replaces the old registry check, which asked the same
+      # question of a place that is no longer part of the release.
+      - name: Verify the release carries a working bundle
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          ver=$(node -p "require('./package.json').version")
+          have=$(gh release view "${GITHUB_REF_NAME}" --json assets --jq '.assets[].name')
+          for asset in "cleartoship-${ver}.tgz" cleartoship-standalone.tgz cleartoship.mjs; do
+            echo "$have" | grep -qx "$asset" || {
+              echo "::error::release ${GITHUB_REF_NAME} is missing the asset ${asset}"
+              exit 1
+            }
+          done
+          rm -f "${RUNNER_TEMP}/released.mjs"
+          gh release download "${GITHUB_REF_NAME}" --pattern cleartoship.mjs --output "${RUNNER_TEMP}/released.mjs"
+          got=$(node "${RUNNER_TEMP}/released.mjs" --version)
+          test "$got" = "$ver" || {
+            echo "::error::the released bundle reports ${got}, but this tag declares ${ver}"
+            exit 1
+          }
+          echo "::notice::${GITHUB_REF_NAME} carries a bundle that runs and reports ${got}."
+
+      # The site fetches this release's standalone build at deploy time, and only for
+      # the exact version package.json declares, so it has to be redeployed once the
+      # release exists. deploy-site.yml then compares the served file's hash with the
+      # release asset.
       - name: Redeploy the site so cleartoship.app serves this release
         env:
           GH_TOKEN: ${{ github.token }}
         run: gh workflow run deploy-site.yml --ref main
-
-      # npm is an OPTIONAL backup channel, not the release. The release is the GitHub
-      # Release plus cleartoship.app, both done above, and neither needs the registry.
-      # The npm steps below run only when the repository variable PUBLISH_TO_NPM is
-      # 'true', so a broken npm token or npmjs.com being unreachable can no longer turn
-      # a good release red. Turn it back on with:
-      #   gh variable set PUBLISH_TO_NPM --body true
-      - name: npm publishing is off
-        if: vars.PUBLISH_TO_NPM != 'true'
-        run: |
-          echo "::notice::npm publishing is disabled (repository variable PUBLISH_TO_NPM is not 'true')."
-          echo "::notice::The GitHub Release and cleartoship.app already carry this version."
-
-      - name: Check the npm token before publishing
-        if: vars.PUBLISH_TO_NPM == 'true'
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-        run: |
-          # npm answers an unauthorized publish with a 404 that reads like "the
-          # package does not exist", which sends you hunting in entirely the wrong
-          # place. Ask who we are first, so the failure names the real cause.
-          if [ -z "$NODE_AUTH_TOKEN" ]; then
-            echo "::error::The NPM_TOKEN secret is empty or not set on this repo."
-            exit 1
-          fi
-          if ! who=$(npm whoami 2>&1); then
-            echo "::error::NPM_TOKEN is not a valid npm token. npm whoami said: ${who}"
-            echo "::error::Do NOT generate a Classic automation token — those are the"
-            echo "::error::2FA-bypass tokens npm restricted from account and package"
-            echo "::error::management in early August 2026, and will stop from publishing"
-            echo "::error::around January 2027. Use a Granular Access token scoped to this"
-            echo "::error::package, or better, migrate this workflow to trusted publishing"
-            echo "::error::(OIDC) — id-token: write is already granted above."
-            exit 1
-          fi
-          echo "npm authenticated as: ${who}"
-
-      - name: Publish to npm
-        if: vars.PUBLISH_TO_NPM == 'true'
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-          # Provenance is gated on this, not on a hand-edited flag, so it turns
-          # itself on the day the repository goes public.
-          REPO_IS_PRIVATE: ${{ github.event.repository.private }}
-        run: |
-          ver=$(node -p "require('./package.json').version")
-          published() { [ "$(npm view "cleartoship@${ver}" version 2>/dev/null)" = "$ver" ]; }
-
-          if published; then
-            echo "cleartoship@${ver} is already published; nothing to do."
-            exit 0
-          fi
-
-          # Provenance ties the tarball to this workflow run and this commit
-          # through Sigstore. The npm CLI's own prerequisites are only an OIDC
-          # token and a public *package* — but the registry adds one the CLI
-          # does not, and 0.9.0 proved it the expensive way:
-          #
-          #   npm error 422 ... Error verifying sigstore provenance bundle:
-          #   Unsupported GitHub Actions source repository visibility: "private".
-          #   Only public source repositories are supported when publishing with
-          #   provenance.
-          #
-          # Worse, the CLI signs and writes the attestation to the *public*
-          # Sigstore transparency log before the registry rejects it, so an
-          # optimistic attempt leaks this repo's name and commit SHA on every
-          # release for nothing. Hence: ask first, attempt never.
-          if [ "$REPO_IS_PRIVATE" = "false" ]; then
-            echo "Repository is public — publishing with provenance."
-            if npm publish --provenance --access public; then
-              exit 0
-            fi
-            if published; then
-              echo "::warning::publish exited non-zero yet the registry serves ${ver}; not retrying"
-              exit 0
-            fi
-            echo "::warning::Publishing with provenance failed. Retrying without it so the release still ships — read the error above and fix it before the next release."
-          else
-            echo "::notice::Repository is private, so npm would reject a provenance-signed publish. Publishing unsigned; this becomes signed automatically once the repo is public."
-          fi
-
-          npm publish --access public
-
-      - name: Verify the registry actually serves it
-        if: vars.PUBLISH_TO_NPM == 'true'
-        run: |
-          # A green publish step is not a published package. Poll until the
-          # registry serves the new version rather than trusting the exit code.
-          ver=$(node -p "require('./package.json').version")
-          for i in $(seq 1 10); do
-            if [ "$(npm view "cleartoship@${ver}" version 2>/dev/null)" = "$ver" ]; then
-              echo "registry serves cleartoship@${ver}"
-              exit 0
-            fi
-            echo "attempt ${i}: not visible yet, waiting..."
-            sleep 6
-          done
-          echo "::error::cleartoship@${ver} never appeared on the registry"
-          exit 1

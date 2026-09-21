@@ -1,6 +1,6 @@
 ---
 name: cleartoship-release
-description: How to ship ClearToShip and verify that it actually shipped — releases, tags, npm publishing, the Cloudflare landing page, version pins in the docs, self-scan coverage, and the rule-calibration bar. Use this whenever the work touches releasing, publishing, tagging, bumping a version, a failing or suspicious CI run, `release.yml` / `ci.yml` / `deploy-site.yml` / `action.yml`, the npm package, the GitHub Action, the site/ Worker, or adding or loosening a scanner rule — and also when a run looks green but you have not yet seen the artifact it was supposed to produce, which is the case this exists for.
+description: How to ship ClearToShip and verify that it actually shipped — releases, tags, the Cloudflare-hosted download, the landing page, version pins in the docs, self-scan coverage, and the rule-calibration bar. Use this whenever the work touches releasing, publishing, tagging, bumping a version, a failing or suspicious CI run, `release.yml` / `ci.yml` / `deploy-site.yml` / `action.yml`, the GitHub Action, the site/ Worker, or adding or loosening a scanner rule — and also when a run looks green but you have not yet seen the artifact it was supposed to produce, which is the case this exists for.
 ---
 
 # Shipping ClearToShip
@@ -17,7 +17,7 @@ that was supposed to change. Not the exit code, not the checkmark — the artifa
 
 | What you did | What proves it worked |
 | --- | --- |
-| Published to npm | `npm view cleartoship@<version> version` returns that version |
+| Served the bundle from the domain | `curl -fsSL https://cleartoship.app/cleartoship.mjs \| shasum -a 256` equals the hash of the release's `cleartoship.mjs` — `deploy-site.yml` compares them itself after every deploy |
 | Deployed the landing page | `npx wrangler deployments list --name cleartoship` shows a *new* version id |
 | Cut a GitHub release | `gh release view v<version>` lists the expected assets, and one downloads and runs |
 
@@ -46,32 +46,45 @@ unpublished, `https://registry.npmjs.org/cleartoship` still returned **HTTP 200*
 The tag is the release. `release.yml` fires on `push: tags: ['v*']` and nothing
 else — merging to `main` publishes nothing.
 
-1. Bump `package.json` (`npm version <x.y.z> --no-git-tag-version`).
+**ClearToShip is not published on npm.** The maintainer cannot use npmjs.com, and
+the package name is unclaimed, so a package by that name on the registry is not
+ours. A release is a GitHub Release with the bundle attached, and
+`cleartoship.app` serving that same file. Nothing in a release talks to the
+registry to publish.
+
+1. Bump `package.json` and the two root `version` fields at the top of
+   `package-lock.json`.
 2. Update every version literal in the docs — see below.
-3. Commit, then tag and push the tag.
+3. Commit and push; let CI go green on `main`. Then tag and push the tag.
 4. Watch the run, then **verify the artifact** per the table above.
 
-Order matters inside the job, and it is deliberate: the GitHub Release is
-created **before** the npm publish. Keep it that way. It used to be the last
-step, so when the token check failed the release was skipped with it, and the
-one distribution channel that does not depend on npm was left hostage to npm
-succeeding. `v0.13.5` tagged, failed at the token, and left a bare tag with
-nothing to download. After the reorder the same failure produced a working,
-downloadable release.
+Inside the job the order is deliberate: create the GitHub Release, verify it
+carries a bundle that runs and reports this version, then dispatch a site
+redeploy. `deploy-site.yml` fetches the release for the exact version in
+`package.json` — never "latest", because `v0.13.5` still contains rules that
+moved to the private Pro package — and compares the served file's hash with the
+release asset. With no matching release the site simply deploys without the
+download files.
 
-The publish step is idempotent (it checks whether the registry already serves
-the version), and so is the release step (it uploads to an existing release
-rather than erroring). This is on purpose: a tag is expected to be **re-run**
-after a credential is fixed, without needing a new version number.
+The release step is idempotent (it uploads to an existing release rather than
+erroring), so a tag can be re-run without needing a new version number. A re-run
+uses the workflow file as it was **at that tag**, so it cannot pick up a fix made
+afterwards: `v0.13.6` is red for that reason and stays red.
 
-### Distribution has three paths, and they are not interchangeable
+### Distribution
 
-- `npx cleartoship` — the npm package. Needs npm to be serving it.
-- `npx github:murtazaozdemir/cleartoship` — builds on install via the `prepare`
-  script. Needs npm for the five runtime dependencies, but not for this package.
-  `prepare`, not `prepublishOnly`: npm runs `prepare` on git installs.
-- `cleartoship-standalone.tgz` from the latest release — one bundled file,
-  `dependencies: {}`, nothing left to resolve.
+- `curl -fsSL https://cleartoship.app/cleartoship.mjs -o cleartoship.mjs && node cleartoship.mjs`
+  — the primary path: one bundled file, no dependencies.
+- The same file at `…/releases/latest/download/cleartoship.mjs`, and
+  `cleartoship-standalone.tgz` (the same bundle as an installable package).
+- `npm i -D github:murtazaozdemir/cleartoship --allow-git=all --allow-scripts=cleartoship`
+  — builds on install via the `prepare` script. Still needs the registry for the
+  five runtime dependencies, but not for this package. `prepare`, not
+  `prepublishOnly`: npm runs `prepare` on git installs.
+- `cleartoship-X.Y.Z.tgz` — the full package, for the library API.
+- The GitHub Action: the release bundle, then a build of its own checkout. It never
+  runs `npx cleartoship`: with the name unclaimed, that executes whatever a
+  stranger registered under it.
 
 The standalone artifact must stay behaviourally identical to the package it
 stands in for; the suite asserts they produce the same findings. A fallback that
