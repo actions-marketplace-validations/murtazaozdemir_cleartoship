@@ -18,10 +18,13 @@ supported one; older versions are not backported.
 ## What it does to your project
 
 **You do not need access to the source repository to check any of this.** The
-published package contains the code that actually runs:
+package tarball attached to each GitHub release contains the code that actually
+runs (once the package is on npm, `npm pack cleartoship` gives you the same
+thing):
 
 ```bash
-npm pack cleartoship && tar xzf cleartoship-*.tgz   # gives you package/dist
+gh release download -R murtazaozdemir/cleartoship -p 'cleartoship-[0-9]*.tgz' \
+  && tar xzf cleartoship-[0-9]*.tgz   # gives you package/dist
 ```
 
 The greps in the table below are written against `src/`. Run the same greps

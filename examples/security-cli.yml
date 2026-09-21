@@ -1,8 +1,9 @@
 # Copy to .github/workflows/security.yml in your own repository.
 #
-# The CLI path: nothing but npm is involved, so it works on any CI, not just
-# GitHub Actions. (The composite action in examples/security.yml is nicer on
-# GitHub — sticky PR comments, typed outputs.)
+# The CLI path: one downloaded file and node, with no package manager, registry
+# or action involved, so it works on any CI, not just GitHub Actions. (The
+# composite action in examples/security.yml is nicer on GitHub — sticky PR
+# comments, typed outputs.)
 name: ClearToShip
 
 on:
@@ -23,18 +24,26 @@ jobs:
         with:
           node-version: 22
 
+      # One bundled file, zero dependencies. The checksum catches a truncated or
+      # corrupted download; it comes from the same host, so it does not defend
+      # against that host being compromised.
+      - name: Fetch ClearToShip
+        run: |
+          curl -fsSL https://cleartoship.app/cleartoship.mjs -o cleartoship.mjs
+          curl -fsSL https://cleartoship.app/SHA256SUMS | grep ' cleartoship.mjs$' | sha256sum -c -
+
       # Write the report for the Security tab, and don't fail on this step —
       # the gate is the second run, so a finding is visible in the UI even when
       # it blocks the build.
-      - run: npx cleartoship --sarif -o cleartoship.sarif --fail-on=none
+      - run: node cleartoship.mjs --sarif -o cleartoship.sarif --fail-on=none
       - uses: github/codeql-action/upload-sarif@v4
         with:
           sarif_file: cleartoship.sarif
 
       # The gate. Registry and OSV answers are cached for 24h, so the second
       # pass re-parses locally and makes no network calls.
-      - run: npx cleartoship --fail-on=critical
+      - run: node cleartoship.mjs --fail-on=critical
 
       # Optional: put the human-readable report in the job summary.
       - if: always()
-        run: npx cleartoship --markdown --fail-on=none >> "$GITHUB_STEP_SUMMARY"
+        run: node cleartoship.mjs --markdown --fail-on=none >> "$GITHUB_STEP_SUMMARY"

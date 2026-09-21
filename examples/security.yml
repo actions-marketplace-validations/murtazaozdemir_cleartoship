@@ -1,8 +1,8 @@
 # Copy to .github/workflows/security.yml in your own repository.
 #
 # This uses the composite action: sticky PR comments and typed outputs. If you
-# would rather depend on nothing but npm, examples/security-cli.yml does the
-# same job through `npx cleartoship`.
+# would rather depend on no action at all, examples/security-cli.yml does the
+# same job with one downloaded file and `node`.
 name: ClearToShip
 
 on:

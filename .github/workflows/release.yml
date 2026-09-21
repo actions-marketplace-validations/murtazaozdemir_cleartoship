@@ -118,7 +118,20 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: gh workflow run deploy-site.yml --ref main
 
+      # npm is an OPTIONAL backup channel, not the release. The release is the GitHub
+      # Release plus cleartoship.app, both done above, and neither needs the registry.
+      # The npm steps below run only when the repository variable PUBLISH_TO_NPM is
+      # 'true', so a broken npm token or npmjs.com being unreachable can no longer turn
+      # a good release red. Turn it back on with:
+      #   gh variable set PUBLISH_TO_NPM --body true
+      - name: npm publishing is off
+        if: vars.PUBLISH_TO_NPM != 'true'
+        run: |
+          echo "::notice::npm publishing is disabled (repository variable PUBLISH_TO_NPM is not 'true')."
+          echo "::notice::The GitHub Release and cleartoship.app already carry this version."
+
       - name: Check the npm token before publishing
+        if: vars.PUBLISH_TO_NPM == 'true'
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
@@ -142,6 +155,7 @@ jobs:
           echo "npm authenticated as: ${who}"
 
       - name: Publish to npm
+        if: vars.PUBLISH_TO_NPM == 'true'
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
           # Provenance is gated on this, not on a hand-edited flag, so it turns
@@ -187,6 +201,7 @@ jobs:
           npm publish --access public
 
       - name: Verify the registry actually serves it
+        if: vars.PUBLISH_TO_NPM == 'true'
         run: |
           # A green publish step is not a published package. Poll until the
           # registry serves the new version rather than trusting the exit code.

@@ -378,9 +378,9 @@
       <div class="groups">
         <div class="group" style="padding-bottom:22px">
           <h3><span class="ic">▲</span> Command line</h3>
-          <div class="badge-code">npx cleartoship</div>
-          <div class="badge-code">npx cleartoship --fix-prompt   <span class="c-dim"># prompt for Cursor / Claude Code</span></div>
-          <div class="badge-code">npx cleartoship --sarif -o results.sarif</div>
+          <div class="badge-code">node cleartoship.mjs</div>
+          <div class="badge-code">node cleartoship.mjs --fix-prompt   <span class="c-dim"># prompt for Cursor / Claude Code</span></div>
+          <div class="badge-code">node cleartoship.mjs --sarif -o results.sarif</div>
         </div>
         <div class="group" style="padding-bottom:22px">
           <h3><span class="ic">⎇</span> GitHub Action</h3>
@@ -455,7 +455,7 @@
     ['c-green','  ✔ PASS      234 credential patterns · 0 leaked keys'],
     ['', ''],
     ['c-red',  '  VERDICT: 🔴 HOLD — resolve the critical findings before deploying'],
-    ['c-dim',  '  → npx cleartoship --fix-prompt'],
+    ['c-dim',  '  → node cleartoship.mjs --fix-prompt'],
   ];
   var out = document.getElementById('scanout');
   var reduced = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;

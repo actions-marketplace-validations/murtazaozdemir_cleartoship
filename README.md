@@ -307,18 +307,22 @@ now CTS085.
 
 ## Usage
 
+Every command below runs the standalone file from the install step above. If you
+have the package installed from a registry instead, `npx cleartoship` takes the
+same flags.
+
 ```bash
-npx cleartoship                          # scan the whole project
-npx cleartoship app supabase             # scan specific paths
-npx cleartoship --offline                # no registry lookups
-npx cleartoship --fix-prompt             # prompt to paste into Cursor / Claude Code
-npx cleartoship --json -o report.json    # machine-readable
-npx cleartoship --sarif -o results.sarif # GitHub code scanning
-npx cleartoship --fail-on high           # stricter CI gate (default: critical)
-npx cleartoship --ignore CTS004,CTS022   # skip rules
-npx cleartoship --no-community           # ClearToShip rules only
-npx cleartoship --no-gitignore           # also scan what .gitignore excludes
-npx cleartoship --markdown               # markdown report (PR comments / summaries)
+node cleartoship.mjs                     # scan the whole project
+node cleartoship.mjs app supabase        # scan specific paths
+node cleartoship.mjs --offline           # no registry lookups
+node cleartoship.mjs --fix-prompt        # prompt to paste into Cursor / Claude Code
+node cleartoship.mjs --json -o report.json # machine-readable
+node cleartoship.mjs --sarif -o results.sarif # GitHub code scanning
+node cleartoship.mjs --fail-on high      # stricter CI gate (default: critical)
+node cleartoship.mjs --ignore CTS004,CTS022 # skip rules
+node cleartoship.mjs --no-community      # ClearToShip rules only
+node cleartoship.mjs --no-gitignore      # also scan what .gitignore excludes
+node cleartoship.mjs --markdown          # markdown report (PR comments / summaries)
 ```
 
 Suppress a single finding inline:
@@ -336,16 +340,17 @@ room to be written out.
 
 ### The CLI (works anywhere, today)
 
-One line in any workflow, on any CI. It needs nothing from GitHub beyond npm:
+Two lines in any workflow, on any CI — no package manager and no registry:
 
 ```yaml
-      - run: npx cleartoship --fail-on=critical
+      - run: curl -fsSL https://cleartoship.app/cleartoship.mjs -o cleartoship.mjs
+      - run: node cleartoship.mjs --fail-on=critical
 ```
 
 To feed findings into GitHub's Security tab:
 
 ```yaml
-      - run: npx cleartoship --sarif -o results.sarif --fail-on=none
+      - run: node cleartoship.mjs --sarif -o results.sarif --fail-on=none
       - uses: github/codeql-action/upload-sarif@v4
         with: { sarif_file: results.sarif }
 ```
