@@ -3,6 +3,10 @@
 > The 30-second pre-launch security clearance for AI-built apps — including the agent
 > surface a runtime scanner cannot reach until after you have already deployed it.
 
+![ClearToShip scanning a deliberately vulnerable Next.js and Supabase app: a hallucinated package, a Server Action with no auth check, and a table with Row Level Security disabled](docs/demo.svg)
+
+<sub>Real output from a scan of this repository's deliberately vulnerable test fixture, trimmed to three findings.</sub>
+
 AI coding assistants write code fast, but they optimise for *"runs without errors"*, not
 *"runs without leaks"*. The failure mode is almost never a dangerous line of code — it's an
 **absent** one: the session check that was never written, the RLS policy that was never
