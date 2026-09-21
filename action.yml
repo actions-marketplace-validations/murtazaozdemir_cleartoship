@@ -30,7 +30,7 @@ inputs:
     description: >-
       Release of ClearToShip to run: a version number, `latest` for the newest
       release, or `local` to build from the checkout. Defaults to the version this
-      action's own ref declares, so `uses: …@v0.13.8` runs 0.13.8.
+      action's own ref declares, so `uses: …@v0.13.9` runs 0.13.9.
     required: false
     default: ''
   working-directory:
