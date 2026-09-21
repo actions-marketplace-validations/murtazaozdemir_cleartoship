@@ -24,6 +24,17 @@ buildFixtures();
 
 const ids = (result) => new Set(result.findings.map((f) => f.id));
 
+// Registry-dependent rules can only be exercised with network access, so those
+// tests skip themselves rather than turning a flaky connection into a red build.
+// This must stay ABOVE every test(): node:test starts running a test the moment
+// it is registered, and the scans in those tests are synchronous enough to hold
+// the event loop past this 5s abort, so a probe placed further down timed out
+// on every run and silently skipped all three network tests, here and in CI.
+const online = await fetch('https://registry.npmjs.org/zod', {
+  headers: { accept: 'application/vnd.npm.install-v1+json' },
+  signal: AbortSignal.timeout(5000),
+}).then((r) => r.ok, () => false);
+
 test('vulnerable fixture: reports every free-tier rule it is built to trigger', async () => {
   // The Server Actions, RLS and LLM/agent suites (CTS001-004, 010-019, 041-046,
   // 050-052, 080-085) are asserted in rls.test.js, server-actions.test.js and
@@ -565,13 +576,6 @@ test('quoted or commented mentions of a risky flag are not findings', async () =
   const result = await scan({ root: CLEAN, offline: true });
   assert.ok(!result.findings.some((f) => f.id === 'CTS045'));
 });
-
-// Registry-dependent rules can only be exercised with network access, so this
-// test skips itself rather than turning a flaky connection into a red build.
-const online = await fetch('https://registry.npmjs.org/zod', {
-  headers: { accept: 'application/vnd.npm.install-v1+json' },
-  signal: AbortSignal.timeout(5000),
-}).then((r) => r.ok, () => false);
 
 test('registry rules resolve hallucinated and lookalike packages', { skip: !online && 'offline' }, async () => {
   const result = await scan({ root: VULNERABLE });
