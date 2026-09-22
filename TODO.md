@@ -4,9 +4,13 @@ Public backlog. Working notes, positioning and anything about other projects
 live in `NOTES.private.md`, which is gitignored and stays on my machine.
 
 _Current release: **v0.13.10** — trims `action.yml`'s description under the GitHub
-Marketplace's 125-character limit, the one thing blocking the Marketplace listing
-(see "List the Action on the Marketplace" below). Every check is in the one free
-download, including the RLS, Server Actions and LLM/agent suites, as of v0.13.9.
+Marketplace's 125-character limit, which was blocking the Marketplace listing;
+[the Action is now live there](https://github.com/marketplace/actions/cleartoship)
+(2026-09-22), under Security / Code Scanning Ready. The first fix for the limit
+broke `action.yml` outright — an unquoted colon in the trimmed description reads
+as a YAML mapping key, and the `Action integration test` workflow caught it within
+a minute, before it reached a tag. Every check is in the one free download,
+including the RLS, Server Actions and LLM/agent suites, as of v0.13.9.
 (They were split into a private package for v0.13.6–0.13.8, which left them in no
 downloadable build; v0.13.8 also closed a hole where a scan would run a package of
 that name found beside it.) v0.13.6's own release run is red — it ran the old
@@ -82,20 +86,46 @@ them found a credential-shaped literal in a comment written the same afternoon.
       open whenever this resumes: `currentPeriodEnd()`'s field-name fallback in
       `stripe-webhook.ts` needs re-checking against whichever Stripe API
       version the real account ends up pinned to.
-- [ ] **List the Action on the Marketplace.** `uses: murtazaozdemir/cleartoship@vX`
-      resolves for anyone now, and `action.yml` already carries the branding a
-      listing requires. What is left cannot be scripted: there is no
-      `marketplace` field on the release object and `/marketplace_listing` is not
-      writable, because publishing means **accepting the GitHub Marketplace
-      Developer Agreement**. That is a legal acceptance, so it has to be done by
-      hand on the release page. The `curl … cleartoship.mjs` recipe in the README works
-      everywhere regardless, and on any CI, not just GitHub.
 - [ ] **Get it in front of people, as early as possible.** Publish and publicize
       now; there is no minimum number of users to reach first (decided 2026-09-21).
       Every calibration decision so far was made against my own six repositories,
       which remains the biggest weakness in the tool's judgement, but the way to
       fix it is more people running it and reporting what comes back wrong, not
       recruiting a set number of testers before launching.
+      **In progress 2026-09-22:** a Show HN post and a dev.to writeup are drafted
+      (the CTS001 calibration story — 60 of 77 sampled findings were wrong, two
+      real bugs hidden by the first version of the fix, both caught by reading
+      what the fix removed). Neither is posted yet — blocked on logging into
+      Hacker News and dev.to in the browser; nothing else is stopping it.
+- [ ] **CTS001 still has real false-positive classes left, found but not fixed
+      2026-09-22.** Of 60 sampled false positives from the 155-repo corpus, 24
+      cleared with the false-positive fix that shipped (v0.13.9); the other 36
+      are left on purpose, not by oversight:
+      - **Name-based "public by design" cases** (analytics beacons, apps with no
+        auth model at all, intake/lead forms) — only separable by route name
+        today, and a name-list heuristic already hid two real bugs in this same
+        pass (`register` hardcoding an Admin role, `leads` running paid
+        enrichment), so widening it needs care, not just more names.
+      - **Clerk middleware that already protects `/api`** — needs the
+        `middleware.ts` matcher and `createRouteMatcher` public-route list
+        actually parsed, not guessed at.
+      - **Signature/auth checks delegated to a helper that itself calls an
+        external service** (a Supabase REST call, a DB-backed API-key lookup)
+        — not credited today because the scanner only follows first-party
+        helpers, never into what they call out to.
+- [ ] **New rule candidate, found during the same pass, not CTS001's job.**
+      Unauthenticated `execa.command(\`...${formField}\`, { shell: true })` —
+      direct shell-command injection from a request field, seen on a real public
+      playground repo. Worth its own rule rather than folding into an existing
+      one; not scoped yet.
+- [ ] **Lockfile-vulnerability false positives, not yet triaged.** 148 of 154
+      repos in the corpus still get a HOLD verdict, almost entirely from real
+      `package-lock.json` / `pnpm-lock.yaml` versions matched against OSV — the
+      overall verdict barely moved across the whole CTS001/CTS030 calibration
+      pass. Unknown yet how much of that 148 is genuine (most likely) versus a
+      severity-mapping or dev-dependency-splitting bug like the ones CTS024
+      already exists to fix. Needs the same read-the-code treatment the other
+      rules got; hasn't started.
 
 ## Later — recorded, not being worked on
 
