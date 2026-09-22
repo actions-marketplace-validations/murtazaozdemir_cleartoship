@@ -35,7 +35,7 @@ reads its visibility, so 0.13.1 is the first release signed with provenance._
 
 ## Where this stands
 
-Fourteen releases, 0.8.0 → 0.13.5. The calibration work is the point of the project
+Twenty-one releases, 0.8.0 → 0.13.10. The calibration work is the point of the project
 so far: across a five-repo corpus the tool went from 2,290 findings to a few
 hundred, and from 157 criticals to a handful — **every removal verified by
 reading the code it was about**, never by adjusting a threshold. Reports that
@@ -71,6 +71,48 @@ The pattern worth keeping: the CI self-scan read `src` and nothing else, so the
 README, the manifests, the shipped Action and the landing page were never
 scanned by the tool that scans them for everyone else. Pointing it at all of
 them found a credential-shaped literal in a comment written the same afternoon.
+
+**0.13.9 re-ran the calibration on a fresh, seeded sample of 155 public repos**
+(the prior corpus was lost when the machine crashed mid-session; nothing
+committed was lost, only the scratch data). Hardcoded credentials (CTS030):
+of 96 critical PostgreSQL connection-string findings, 63 were a default
+password on localhost and 18 were templates — only 5, across 2 repos, were a
+real password to a remote host; 222 → 51 findings. CTS001 (missing auth on a
+Server Action or route handler that writes) got the same treatment: one
+finding read per repo, 60 of 77 wrong. Fixed at the cause — a helper that
+provably does nothing outside the process (new `src/scanners/effects.ts`),
+signature and credential-header checks recognised more widely, an
+authorization helper credited when its result gates the write before it
+happens. **Verified by reading what the fix removed, not just what it kept**:
+of 60 sampled removals, 2 were real bugs the first version of the fix had
+hidden along with the noise (a caller-set `x-actor-role` header read as
+authorization; an approval flag read from a row the caller's own request body
+selected) — both restored, both have regression tests now. 732 → 603
+findings on the full corpus, all 17 confirmed real findings still reported.
+Also found and fixed in the same pass: the three registry/OSV-dependent
+tests had been silently skipping on every run, local and in CI, since at
+least 73abec9 — the probe that decides `online` sat below other tests in the
+file and starved on the event loop before its own timeout fired.
+
+**0.13.10 is the first release found by dogfooding a sibling project.**
+Scanning `aistoreaudit` (live on the Shopify App Store) with the newly
+calibrated tool, then verifying its maintainer's fixes actually landed,
+turned up two more scanner bugs that the 155-repo corpus never surfaced: a
+`cleartoship-ignore` comment that silently didn't apply because a real
+statement sat between it and the line it was suppressing, and a regex false
+positive in the vendored "JWT algorithm none" rule (VG105) — it matched a
+function's own declaration as a call when a helper shared the wrapped
+function's name, and separately backtracked across nested parens in a
+`jwt.verify` call's secret argument and missed the real options object.
+Fixed with a `MATCH_GUARDS` entry rather than touching the vendored file,
+verified against both the fixed code and the actual pre-fix vulnerable
+version pulled from that repo's own git history. Also listed [the Action on
+the GitHub Marketplace](https://github.com/marketplace/actions/cleartoship)
+this release — the Developer Agreement acceptance was the last blocker, and
+`action.yml`'s description turned out to be 83 characters over the
+Marketplace's limit. The first attempted fix broke `action.yml` outright (an
+unquoted colon reads as a YAML mapping key); the `Action integration test`
+workflow caught it within a minute, before it reached a tag.
 
 ## Open
 
