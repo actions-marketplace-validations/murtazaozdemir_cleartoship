@@ -1,5 +1,5 @@
 name: ClearToShip
-description: Pre-flight security check for AI-built apps, agents included. Blocks PRs on ungated agent tools, model output in a shell, missing Server Action auth, Supabase RLS holes, hallucinated packages and leaked keys.
+description: Pre-flight security check for AI-built apps, agents included: missing auth, RLS holes, hallucinated packages, leaked keys.
 author: ClearToShip
 branding:
   icon: shield

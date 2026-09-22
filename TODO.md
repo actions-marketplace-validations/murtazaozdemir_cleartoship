@@ -3,12 +3,15 @@
 Public backlog. Working notes, positioning and anything about other projects
 live in `NOTES.private.md`, which is gitignored and stays on my machine.
 
-_Current release: **v0.13.9** — every check is in the one free download, including
-the RLS, Server Actions and LLM/agent suites. (They were split into a private
-package for v0.13.6–0.13.8, which left them in no downloadable build; v0.13.8 also
-closed a hole where a scan would run a package of that name found beside it.)
-v0.13.6's own release run is red — it ran the old workflow, which still tried npm,
-and a re-run uses the workflow as it was at the tag. The release itself is fine.
+_Current release: **v0.13.10** — trims `action.yml`'s description under the GitHub
+Marketplace's 125-character limit, the one thing blocking the Marketplace listing
+(see "List the Action on the Marketplace" below). Every check is in the one free
+download, including the RLS, Server Actions and LLM/agent suites, as of v0.13.9.
+(They were split into a private package for v0.13.6–0.13.8, which left them in no
+downloadable build; v0.13.8 also closed a hole where a scan would run a package of
+that name found beside it.) v0.13.6's own release run is red — it ran the old
+workflow, which still tried npm, and a re-run uses the workflow as it was at the
+tag. The release itself is fine.
 Install from
 [cleartoship.app](https://cleartoship.app/cleartoship.mjs)
 (`curl -fsSL https://cleartoship.app/cleartoship.mjs -o cleartoship.mjs && node cleartoship.mjs`);

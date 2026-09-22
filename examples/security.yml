@@ -25,7 +25,7 @@ jobs:
       - uses: actions/setup-node@v7
         with:
           node-version: 22
-      - uses: murtazaozdemir/cleartoship@v0.13.9
+      - uses: murtazaozdemir/cleartoship@v0.13.10
         with:
           fail-on: critical   # block the PR only on criticals
           comment: true        # post a summary comment on the PR

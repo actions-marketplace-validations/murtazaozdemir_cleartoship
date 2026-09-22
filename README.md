@@ -362,7 +362,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - uses: murtazaozdemir/cleartoship@v0.13.9
+      - uses: murtazaozdemir/cleartoship@v0.13.10
         with:
           fail-on: critical
           comment: true
@@ -385,7 +385,7 @@ per-severity counts `critical`, `high`, `medium`, `low`, plus `total` and
 the same comment instead of piling up.
 
 By default the action runs the release bundle for the version its own ref
-declares, so `@v0.13.9` runs ClearToShip 0.13.9 and pinning the ref pins the
+declares, so `@v0.13.10` runs ClearToShip 0.13.10 and pinning the ref pins the
 behaviour. If that release has no bundle, it builds from its own checkout
 instead, so `uses: …@ref` works against an unreleased commit. It never fetches or
 runs anything from the npm registry under ClearToShip's name.
