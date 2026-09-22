@@ -1,5 +1,5 @@
 name: ClearToShip
-description: Pre-flight security check for AI-built apps, agents included: missing auth, RLS holes, hallucinated packages, leaked keys.
+description: Pre-flight security check for AI-built apps, agents included — missing auth, RLS holes, hallucinated packages, leaked keys.
 author: ClearToShip
 branding:
   icon: shield
