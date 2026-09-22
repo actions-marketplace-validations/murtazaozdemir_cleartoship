@@ -46,7 +46,7 @@ jobs:
       - run: >-
           node dist/cli.js
           src site examples scripts .github
-          action.yml package.json README.md SECURITY.md ATTRIBUTION.md TODO.md
+          action.yml package.json README.md SECURITY.md ATTRIBUTION.md TODO.md CLAUDE.md
           --fail-on=critical
 
   # A version that appears in prose drifts; one that is asserted does not.
