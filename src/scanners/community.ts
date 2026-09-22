@@ -215,6 +215,26 @@ const HAS_STEP_CAP =
   /\b(stopWhen|stop_when|stopConditions|maxSteps|max_steps|max_iterations|maxIterations|maxTokens|max_tokens|maxOutputTokens|max_output_tokens)\b/;
 
 /**
+ * The real argument list of a call whose name starts at `index`: counts parens
+ * from the call's own `(` to its matching `)`, so a nested call inside an
+ * argument does not look like the end of the outer one. Bounded, since this
+ * only ever runs on the handful of matches one rule produces per file.
+ */
+function callArgs(source: string, index: number): string {
+  const open = source.indexOf('(', index);
+  if (open === -1) return '';
+  let depth = 0;
+  for (let i = open; i < source.length && i < open + 4000; i++) {
+    if (source[i] === '(') depth++;
+    else if (source[i] === ')') {
+      depth--;
+      if (depth === 0) return source.slice(open + 1, i);
+    }
+  }
+  return source.slice(open + 1, open + 4000);
+}
+
+/**
  * Per-rule filters for a match shape the upstream regex cannot exclude on its
  * own. Given the matched text plus where it sat, so a guard can look around it.
  */
@@ -226,6 +246,39 @@ const MATCH_GUARDS: Record<
   // disk rather than a tarball, so it has no integrity hash by design. Thirty of
   // them in one pnpm-managed lockfile, every one reported as a false critical.
   VG870: (match) => !/"link"\s*:\s*true/.test(match),
+
+  // Two bugs stacked on one real app. First: the bare-identifier alternative
+  // `verifyToken` matches the literal text "verifyToken(" wherever it appears —
+  // including the function's own DECLARATION, `export function verifyToken(token:
+  // string): JwtPayload | null {`, which is not a call at all. `function`
+  // immediately before the name is the tell; a declaration's own body then reads
+  // as if it were the call's arguments. Second, even at a genuine call, the "no
+  // `algorithms` option" branch trusts its own `\s*\)` to mark where the call
+  // ends — but the second argument is often itself a call,
+  // `jwt.verify(token, getJwtSecret(), { algorithms: ["HS256"] })`, and the regex
+  // backtracks onto getJwtSecret()'s own closing paren rather than reading past
+  // it: it matches only `jwt.verify(token, getJwtSecret()` and never sees the
+  // real options object. Re-find the call's actual matching paren by counting
+  // braces instead of trusting where the regex gave up, and keep the finding
+  // only when algorithms is truly absent from what is inside it. The other
+  // alternative this rule matches — a literal `algorithms: ["none"]` — needs
+  // neither check: it is unambiguous wherever it appears.
+  VG105: (match, source, index) => {
+    if (!/^(?:jwt\.verify|jwtVerify|verifyToken)/i.test(match)) return true;
+    const before = source.slice(Math.max(0, index - 20), index);
+    if (/(?:^|[\s;{}])(?:async\s+)?function\s*$/.test(before)) {
+      // The match is anchored on the declaration, which swallowed everything up
+      // to wherever the real call inside the function body happened to close —
+      // not necessarily that call's own true end. What decides the question is
+      // the genuine `jwt.verify`/`jwtVerify` call inside the body, wherever it
+      // is, found by searching from the real source rather than trusting the
+      // span the outer, wrong match already committed to.
+      const inner = /(?:jwt\.verify|jwtVerify)\s*\(/.exec(match);
+      if (!inner) return false;
+      return !/algorithms\s*:/.test(callArgs(source, index + inner.index));
+    }
+    return !/algorithms\s*:/.test(callArgs(source, index));
+  },
 
   // The verb list has no word boundary in front of it and includes `all`, `get`
   // and `run`, so `querySelectorAll(\`[name="${CSS.escape(k)}"]\`)` reads as a
