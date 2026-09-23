@@ -41,9 +41,72 @@ const UNSAFE_DESERIALIZE = [
   'yaml.unsafe_load', // python
 ];
 
-/** Function names that signal the body is making a security decision. */
+/**
+ * Function names that signal the body is making a security decision.
+ *
+ * `ensure` used to count on its own, so `ensureDir() { try { mkdirSync(…) }
+ * catch {} }` — the idiomatic "create it unless it exists" — was reported as a
+ * security check swallowing its error. `ensure` is a security word only when
+ * what it ensures is one.
+ */
 const SECURITY_FN =
-  /(verify|validate|authenticate|authorize|auth|check(?:auth|access|permission)?|hasaccess|haspermission|isallowed|isauthorized|canaccess|ensure|guard|require(?:auth|user|admin)?)/i;
+  /(verify|validate|authenticate|authorize|auth|check(?:auth|access|permission)?|hasaccess|haspermission|isallowed|isauthorized|canaccess|ensure(?:admin|user|owner|member|role|permission|access|session|loggedin|signedin|login|allowed|authorized|authenticated)|guard|require(?:auth|user|admin)?)/i;
+
+/** The name a property key spells, when it spells one. */
+function keyName(key: any): string {
+  if (!key) return '';
+  if (key.type === 'Identifier') return key.name;
+  if (key.type === 'StringLiteral') return key.value;
+  if (key.type === 'PrivateName') return key.id?.name ?? '';
+  return '';
+}
+
+/**
+ * Name of the nearest enclosing named function, for judging whether a block
+ * guards a security decision.
+ *
+ * Only declarations, function expressions and variables were read, so the two
+ * places auth code most often lives were invisible: an object method (NextAuth's
+ * `authorize(credentials) { … catch { return user } }`) and a class method
+ * (`class Guard { verify(token) { … catch { return true } } }`). Both are named
+ * by their key.
+ */
+function enclosingFunctionName(path: any): string {
+  let p = path.parentPath;
+  let hops = 0;
+  while (p && hops++ < 12) {
+    const n = p.node;
+    switch (n?.type) {
+      case 'FunctionDeclaration':
+        return n.id?.name ?? '';
+      case 'ObjectMethod':
+      case 'ClassMethod':
+      case 'ClassPrivateMethod':
+        return keyName(n.key);
+      case 'FunctionExpression':
+      case 'ArrowFunctionExpression': {
+        if (n.id?.name) return n.id.name;
+        // Named by where it is put: `const verify = () => …`, `{ verify: () => … }`,
+        // `class { verify = () => … }`.
+        const parent = p.parentPath?.node;
+        if (parent?.type === 'VariableDeclarator' && parent.id?.type === 'Identifier') return parent.id.name;
+        if (
+          (parent?.type === 'ObjectProperty' ||
+            parent?.type === 'ClassProperty' ||
+            parent?.type === 'ClassPrivateProperty') &&
+          parent.value === n
+        ) {
+          return keyName(parent.key);
+        }
+        // An anonymous callback (`items.forEach(() => …)`): keep looking outward
+        // for the function it sits in.
+        break;
+      }
+    }
+    p = p.parentPath;
+  }
+  return '';
+}
 
 /** Values a security check must never return from a swallowed error (fail-open). */
 function isPermissiveReturn(node: any): boolean {
@@ -75,14 +138,17 @@ export const logicScanner: Scanner = {
   async run(ctx): Promise<ScanResult> {
     const result = emptyResult();
     let analysed = 0;
+    const unanalysed: string[] = [];
+    const failed: string[] = [];
 
     for (const file of ctx.files) {
       const script = isScript(file);
       const python = file.endsWith('.py');
       if (!script && !python) continue;
+      const relPath = rel(ctx.root, file);
+      try {
       const source = read(file);
       if (source === null) continue;
-      const relPath = rel(ctx.root, file);
       // A swallowed error or a logged token in a maintenance script is a
       // smaller problem than the same line inside a request handler.
       const place = (f: any) => {
@@ -120,7 +186,12 @@ export const logicScanner: Scanner = {
       }
 
       const ast = parseSource(source, file);
-      if (!ast) continue;
+      if (!ast) {
+        // Skipping it silently read as "nothing wrong here" — the worst
+        // answer a scanner can give about a file it never analysed.
+        unanalysed.push(relPath);
+        continue;
+      }
       analysed++;
 
       traverse(ast, {
@@ -198,20 +269,7 @@ export const logicScanner: Scanner = {
 
           // Name of the nearest enclosing function, to tell whether this catch
           // guards a security decision.
-          let fnName = '';
-          let p = path.parentPath;
-          let hops = 0;
-          while (p && hops++ < 8) {
-            const n = p.node;
-            if (n?.type === 'FunctionDeclaration' || n?.type === 'FunctionExpression') {
-              fnName = n.id?.name ?? '';
-              break;
-            }
-            if (n?.type === 'ArrowFunctionExpression' || n?.type === 'VariableDeclarator') {
-              fnName = n.id?.name ?? fnName;
-            }
-            p = p.parentPath;
-          }
+          const fnName = enclosingFunctionName(path);
           const securityContext = SENSITIVE_NAME.test(fnName) || SECURITY_FN.test(fnName);
           if (!securityContext) return;
 
@@ -253,6 +311,18 @@ export const logicScanner: Scanner = {
           }
         },
       });
+      } catch (err) {
+        // One file the analysis cannot finish — a 20,000-deep member chain
+        // overflows the stack in traversal — costs that file, not the run.
+        failed.push(`${relPath} (${err instanceof Error ? err.message : String(err)})`);
+      }
+    }
+
+    for (const f of unanalysed) {
+      result.incomplete!.push(`${f} could not be parsed, so the logging, error-handling and deserialization checks did not run on it.`);
+    }
+    for (const f of failed) {
+      result.incomplete!.push(`The logging, error-handling and deserialization checks could not finish ${f}.`);
     }
 
     result.checks.push({
