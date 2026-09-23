@@ -1,8 +1,11 @@
-// Hand-written rather than `wrangler types` — generating that requires a
-// live Cloudflare/D1 binding (`database_id` is still a placeholder in
-// wrangler.jsonc until `wrangler d1 create` has been run for real), so there
-// is nothing yet for the generator to introspect. Regenerate this with
-// `wrangler types` once the D1 database exists and swap this file out.
+// Hand-written. The D1 database now exists (its real id is in wrangler.jsonc),
+// so `npm run types` could generate this instead; until someone switches over,
+// keep it in step with the bindings and secrets listed in wrangler.jsonc.
+//
+// The three secrets are typed `string`, but billing is dormant: until each has
+// been set with `wrangler secret put`, it is undefined at run time. That is why
+// every billing route checks the ones it needs first (`billingUnavailable` in
+// stripe-client.ts) and answers 503 rather than crashing with a 500.
 export interface Env {
   DB: D1Database;
   STRIPE_SECRET_KEY: string;

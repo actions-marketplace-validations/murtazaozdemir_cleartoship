@@ -1,9 +1,9 @@
 import Stripe from 'stripe';
 import type { Env, LicensePayload } from './types.js';
 import { CURRENT_KEY_ID } from './types.js';
-import { createStripeClient } from './stripe-client.js';
+import { billingUnavailable, createStripeClient } from './stripe-client.js';
 import { signLicenseToken } from './license-token.js';
-import { upsertLicense, revokeBySubscription } from './db.js';
+import { upsertLicense, revokeBySubscription, lastEventCreated } from './db.js';
 
 // Single bundled "Pro" tier today — the field exists so a future à la carte
 // or "team" tier has somewhere to put a different list without a schema
@@ -23,6 +23,12 @@ export async function handleStripeWebhook(request: Request, env: Env): Promise<R
   if (request.method !== 'POST') {
     return new Response('Method Not Allowed', { status: 405 });
   }
+  const unavailable = billingUnavailable(env, [
+    'STRIPE_SECRET_KEY',
+    'STRIPE_WEBHOOK_SECRET',
+    'LICENSE_SIGNING_PRIVATE_KEY_JWK',
+  ]);
+  if (unavailable) return unavailable;
 
   const signature = request.headers.get('stripe-signature');
   if (!signature) {
@@ -50,7 +56,8 @@ export async function handleStripeWebhook(request: Request, env: Env): Promise<R
   }
 
   if (event.type.startsWith('customer.subscription.')) {
-    await handleSubscriptionEvent(event.data.object as Stripe.Subscription, stripe, env);
+    const subscription = event.data.object as Stripe.Subscription;
+    await handleSubscriptionEvent(subscription.id, event.created, stripe, env);
   }
 
   return Response.json({ received: true });
@@ -70,16 +77,52 @@ function currentPeriodEnd(subscription: Stripe.Subscription): number {
   return Math.floor(Date.now() / 1000) + FALLBACK_PERIOD_SECONDS;
 }
 
+function isMissingResource(err: unknown): boolean {
+  const e = err as { code?: string; statusCode?: number };
+  return e?.code === 'resource_missing' || e?.statusCode === 404;
+}
+
+// Stripe delivers events at least once and in no guaranteed order, so the
+// event's payload is a snapshot that may already be stale when it arrives: a
+// `customer.subscription.created` retried after `...deleted` still says
+// "active". Acting on it used to re-grant a cancelled customer. So:
+//   1. an event older than the newest one already applied to this
+//      subscription is ignored outright;
+//   2. otherwise the subscription is re-read from Stripe, and its CURRENT
+//      status decides — the event only says "something changed";
+//   3. the write itself repeats the age check (db.ts), which closes the race
+//      between two deliveries handled concurrently.
 async function handleSubscriptionEvent(
-  subscription: Stripe.Subscription,
+  subscriptionId: string,
+  eventCreated: number,
   stripe: Stripe,
   env: Env,
 ): Promise<void> {
+  const last = await lastEventCreated(env.DB, subscriptionId);
+  if (last !== null && eventCreated < last) {
+    console.log(`ignoring stale event for ${subscriptionId}: created ${eventCreated} < ${last}`);
+    return;
+  }
+
+  let subscription: Stripe.Subscription;
+  try {
+    subscription = await stripe.subscriptions.retrieve(subscriptionId);
+  } catch (err) {
+    // Stripe keeps cancelled subscriptions retrievable, so "no such
+    // subscription" means it was deleted outright: nothing left to entitle.
+    if (isMissingResource(err)) {
+      await revokeBySubscription(env.DB, subscriptionId, 'stripe: subscription not found', eventCreated);
+      return;
+    }
+    // Anything else is transient. Throwing answers 500, and Stripe retries.
+    throw err;
+  }
+
   const customerId =
     typeof subscription.customer === 'string' ? subscription.customer : subscription.customer.id;
 
   if (REVOKED_STATUSES.has(subscription.status)) {
-    await revokeBySubscription(env.DB, subscription.id, `stripe status: ${subscription.status}`);
+    await revokeBySubscription(env.DB, subscription.id, `stripe status: ${subscription.status}`, eventCreated);
     return;
   }
 
@@ -95,6 +138,8 @@ async function handleSubscriptionEvent(
 
   const issuedAt = Math.floor(Date.now() / 1000);
   const expiresAt = currentPeriodEnd(subscription) + GRACE_PERIOD_SECONDS;
+  // Used only if this subscription has no row yet; an existing row keeps its
+  // jti (db.ts), so tokens already issued stay revocable by the same id.
   const jti = crypto.randomUUID();
 
   const payload: LicensePayload = {
@@ -112,7 +157,7 @@ async function handleSubscriptionEvent(
   // Signing here isn't strictly necessary for the webhook's own job (D1 is
   // the source of truth for revocation, and /license/issue re-signs on
   // demand from the stored fields) — but doing it once up front fails loudly
-  // and immediately if LICENSE_SIGNING_PRIVATE_KEY_JWK is ever missing,
+  // and immediately if LICENSE_SIGNING_PRIVATE_KEY_JWK is ever unusable,
   // rather than only surfacing that at the moment a customer tries to fetch
   // their key.
   await signLicenseToken(payload, env);
@@ -127,5 +172,6 @@ async function handleSubscriptionEvent(
     issuedAt,
     expiresAt,
     keyId: CURRENT_KEY_ID,
+    eventCreated,
   });
 }
