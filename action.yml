@@ -30,15 +30,29 @@ inputs:
     description: >-
       Release of ClearToShip to run: a version number, `latest` for the newest
       release, or `local` to build from the checkout. Defaults to the version this
-      action's own ref declares, so `uses: …@v0.13.9` runs 0.13.9.
+      action's own ref declares, so `uses: …@vX.Y.Z` runs X.Y.Z. A downloaded
+      release bundle only runs after its GitHub build-provenance attestation
+      verifies; releases made before attestations existed (0.13.10 and earlier)
+      are only run by building this action's own checkout.
     required: false
     default: ''
   working-directory:
     description: Directory to run the scan from.
     required: false
     default: '.'
+  allow-incomplete:
+    description: >-
+      Pass the job even when a check could not finish (a parse failure, an
+      unreadable file, a registry or OSV outage, a scanner crash). By default an
+      incomplete scan fails the job, the same way the CLI exits 3 — "nothing was
+      found" and "not everything was read" are different answers. Findings at or
+      above `fail-on` fail the job either way, and `fail-on: none` disables both.
+    required: false
+    default: 'false'
   github-token:
-    description: Token used to post the PR comment.
+    description: >-
+      Token used to resolve and verify the release bundle (`gh attestation
+      verify`) and to post the PR comment.
     required: false
     default: ${{ github.token }}
 
@@ -46,9 +60,9 @@ outputs:
   resolved:
     description: >-
       Which scanner actually ran: `release` (the standalone bundle from the
-      GitHub release, no registry involved) or `checkout` (built from this
-      action's own source). Tried in that order; the action works either way,
-      and this says which.
+      GitHub release, run only after its build-provenance attestation verified)
+      or `checkout` (built from this action's own source). Tried in that order;
+      the action works either way, and this says which.
     value: ${{ steps.resolve.outputs.resolved }}
   verdict:
     description: One of clear, conditional, or hold.
@@ -71,6 +85,20 @@ outputs:
   blocking:
     description: Number of findings at or above the fail-on severity.
     value: ${{ steps.scan.outputs.blocking }}
+  incomplete:
+    description: >-
+      Number of checks that could not finish (the JSON report's `incomplete`
+      array says why). Non-zero fails the job unless `allow-incomplete` is set.
+    value: ${{ steps.scan.outputs.incomplete }}
+  report-json:
+    description: Path of the full JSON report, under $RUNNER_TEMP (outside the checkout).
+    value: ${{ steps.scan.outputs.report-json }}
+  report-markdown:
+    description: Path of the markdown report, under $RUNNER_TEMP (outside the checkout).
+    value: ${{ steps.scan.outputs.report-markdown }}
+  sarif-file:
+    description: Path of the SARIF report when `sarif` is true, under $RUNNER_TEMP.
+    value: ${{ steps.scan.outputs.sarif-file }}
 
 runs:
   using: composite
@@ -80,16 +108,23 @@ runs:
       shell: bash
       env:
         INPUT_VERSION: ${{ inputs.version }}
+        GH_TOKEN: ${{ inputs.github-token }}
       run: |
+        set -euo pipefail
         # With no version pinned, run the exact version this action's checkout
         # declares. That keeps the action ref and the scanner in lockstep:
         # pinning `uses: <owner>/cleartoship@vX.Y.Z` runs cleartoship@X.Y.Z
         # instead of whatever happens to be newest at the time. Written
         # without a literal version on purpose: this line has twice been left
         # stating the previous release during a bump.
+        #
+        # Pinning the action to a commit SHA works the same way: `ver` is what
+        # package.json says at that commit. A commit bumped but not yet tagged has
+        # no release, so the checkout build below runs that commit's own source.
+        checkout_ver=$(node -p "require('${GITHUB_ACTION_PATH}/package.json').version")
         ver="$INPUT_VERSION"
         if [ -z "$ver" ]; then
-          ver=$(node -p "require('${GITHUB_ACTION_PATH}/package.json').version")
+          ver="$checkout_ver"
           echo "No version pinned; matching this action's checkout: ${ver}"
         fi
 
@@ -104,28 +139,110 @@ runs:
         # Action works whichever path runs, which is the point, but a test claiming
         # "the release build is fine" could not tell it had graded something else.
         repo=$(node -p "require('${GITHUB_ACTION_PATH}/package.json').repository.url.replace(/^git\+/,'').replace(/\.git$/,'')")
-        if [ "$ver" = "latest" ]; then
-          asset="${repo}/releases/latest/download/cleartoship.mjs"
-        else
-          asset="${repo}/releases/download/v${ver}/cleartoship.mjs"
-        fi
-        bundle="${RUNNER_TEMP}/cleartoship-${ver}.mjs"
+        slug="${repo#https://github.com/}"
+
+        build_checkout() {
+          ( cd "$GITHUB_ACTION_PATH" && npm ci --silent && npm run build --silent )
+          echo "cmd=node ${GITHUB_ACTION_PATH}/dist/cli.js" >> "$GITHUB_OUTPUT"
+          echo "resolved=checkout" >> "$GITHUB_OUTPUT"
+        }
 
         if [ "$ver" = "local" ]; then
           echo "version: local - building from the action checkout."
-          ( cd "$GITHUB_ACTION_PATH" && npm ci --silent && npm run build --silent )
-          echo "cmd=node ${GITHUB_ACTION_PATH}/dist/cli.js" >> "$GITHUB_OUTPUT"
-          echo "resolved=checkout" >> "$GITHUB_OUTPUT"
-        elif curl -fsSL --retry 2 "$asset" -o "$bundle" && node "$bundle" --version >/dev/null 2>&1; then
-          echo "cmd=node ${bundle}" >> "$GITHUB_OUTPUT"
-          echo "resolved=release" >> "$GITHUB_OUTPUT"
-          echo "Using the standalone bundle from release ${ver} - no registry involved."
-        else
-          echo "No release bundle for ${ver}; building from the checkout."
-          ( cd "$GITHUB_ACTION_PATH" && npm ci --silent && npm run build --silent )
-          echo "cmd=node ${GITHUB_ACTION_PATH}/dist/cli.js" >> "$GITHUB_OUTPUT"
-          echo "resolved=checkout" >> "$GITHUB_OUTPUT"
+          build_checkout
+          exit 0
         fi
+
+        # `latest` is pinned to a concrete version first, so the bundle is
+        # verified against the tag it claims to come from. GitHub answers
+        # releases/latest/download/<asset> with a redirect to
+        # releases/download/v<X.Y.Z>/<asset>, which names the tag without an API
+        # call (and without its rate limit).
+        from_latest=false
+        if [ "$ver" = "latest" ]; then
+          target=$(curl -fsS --retry 2 -o /dev/null -w '%{redirect_url}' \
+                     "${repo}/releases/latest/download/cleartoship.mjs" || true)
+          ver=$(printf '%s' "$target" | sed -nE 's#^.*/releases/download/v([^/]+)/cleartoship\.mjs$#\1#p')
+          if [ -z "$ver" ]; then
+            echo "::error::Could not resolve the latest ClearToShip release of ${slug} (got '${target}')."
+            exit 1
+          fi
+          from_latest=true
+          echo "latest resolves to ${ver}"
+        fi
+
+        if ! [[ "$ver" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
+          echo "::error::version '${ver}' is not a release version. Use X.Y.Z, latest or local."
+          exit 1
+        fi
+
+        # Build-provenance attestations start with the first release after
+        # 0.13.10. An older bundle has nothing to verify against, so it is never
+        # downloaded and run. The only way to run one of those versions is the
+        # checkout build of that same version, i.e. pinning the action to its tag.
+        # (`latest` is let through to the checkout build as well, so it keeps
+        # working in the window before the first attested release exists.)
+        IFS=.- read -r major minor patch _ <<< "$ver"
+        if (( 10#$major * 1000000 + 10#$minor * 1000 + 10#$patch <= 13010 )); then
+          if [ "$ver" = "$checkout_ver" ] || [ "$from_latest" = "true" ]; then
+            echo "::notice::Release ${ver} predates build-provenance attestations, so its bundle cannot be verified. Building ${checkout_ver} from this action's checkout instead."
+            build_checkout
+            exit 0
+          fi
+          echo "::error::Release ${ver} predates build-provenance attestations, so this action will not download and run its bundle unverified. Pin the action itself instead (uses: ${slug}@v${ver}), or set version: local."
+          exit 1
+        fi
+
+        asset="${repo}/releases/download/v${ver}/cleartoship.mjs"
+        bundle="${RUNNER_TEMP}/cleartoship-${ver}.mjs"
+        rm -f "$bundle"
+        if ! curl -fsSL --retry 2 "$asset" -o "$bundle"; then
+          rm -f "$bundle"
+          # When the version is this checkout's own, a missing bundle is not a
+          # threat, it is an unreleased commit (or a release still attaching its
+          # assets): build this action's own source, the code already running
+          # this step. Any other version is not what the checkout contains, so
+          # building it would run something other than what was asked for.
+          if [ "$ver" = "$checkout_ver" ]; then
+            echo "No release bundle for ${ver}; building from the checkout."
+            build_checkout
+            exit 0
+          fi
+          echo "::error::Could not download the ClearToShip ${ver} release bundle from ${asset}, and this action's checkout is ${checkout_ver}, not ${ver}."
+          exit 1
+        fi
+
+        # A bundle that did download must prove where it came from before it
+        # runs, and this fails closed: a bundle that does not verify is NOT
+        # quietly swapped for the checkout build, because that would hide a
+        # tampered release asset behind a green job. It must have been built by
+        # this repository's release workflow, from this version's tag, on a
+        # GitHub-hosted runner.
+        if ! command -v gh >/dev/null 2>&1; then
+          rm -f "$bundle"
+          echo "::error::The GitHub CLI (gh) is needed to verify the ClearToShip release bundle and is not on this runner. Install it, or set version: local to build from the action checkout."
+          exit 1
+        fi
+        if ! gh attestation verify "$bundle" \
+               --repo "$slug" \
+               --signer-workflow "${slug}/.github/workflows/release.yml" \
+               --source-ref "refs/tags/v${ver}" \
+               --deny-self-hosted-runners; then
+          rm -f "$bundle"
+          echo "::error::The ClearToShip ${ver} release bundle failed build-provenance verification (gh attestation verify) and was not run. Please report this at ${repo}/security."
+          exit 1
+        fi
+        # The version is stamped into the bundle at build time, so a verified
+        # file from a different release (a rollback swap) is caught here.
+        got=$(node "$bundle" --version)
+        if [ "$got" != "$ver" ]; then
+          rm -f "$bundle"
+          echo "::error::The verified bundle attached to v${ver} reports version '${got}'. It was not run."
+          exit 1
+        fi
+        echo "cmd=node ${bundle}" >> "$GITHUB_OUTPUT"
+        echo "resolved=release" >> "$GITHUB_OUTPUT"
+        echo "Using the standalone bundle from release ${ver}, provenance verified - no registry involved."
 
     - name: Run ClearToShip
       id: scan
@@ -139,18 +256,34 @@ runs:
         INPUT_OFFLINE: ${{ inputs.offline }}
         INPUT_SARIF: ${{ inputs.sarif }}
         INPUT_FAIL_ON: ${{ inputs.fail-on }}
+        INPUT_ALLOW_INCOMPLETE: ${{ inputs.allow-incomplete }}
       run: |
         set -o pipefail
         args=()
         if [ -n "$INPUT_PATHS" ]; then read -ra args <<< "$INPUT_PATHS"; fi
         if [ "$INPUT_OFFLINE" = "true" ]; then args+=(--offline); fi
+        if [ "$INPUT_ALLOW_INCOMPLETE" = "true" ]; then args+=(--allow-incomplete); fi
+
+        # Reports go under $RUNNER_TEMP, never into the checkout. The checkout is
+        # the code under review, and a committed symlink named cleartoship.json
+        # would turn `>` into a write to wherever it points. The paths are
+        # exposed as outputs for later steps.
+        out=$(mktemp -d "${RUNNER_TEMP}/cleartoship.XXXXXX")
+        {
+          echo "report-dir=${out}"
+          echo "report-json=${out}/cleartoship.json"
+          echo "report-markdown=${out}/cleartoship.md"
+        } >> "$GITHUB_OUTPUT"
 
         # The gate is applied at the end so the report and comment are produced
-        # regardless of pass/fail; --fail-on=none keeps this step from aborting early.
-        $CTS "${args[@]}" --json --fail-on=none > cleartoship.json
-        $CTS "${args[@]}" --markdown --fail-on=none > cleartoship.md || true
+        # regardless of pass/fail; --fail-on=none keeps this step from aborting
+        # early. It also silences the CLI's incomplete-scan exit 3, which the
+        # gate step below re-applies from the report.
+        $CTS "${args[@]}" --json --fail-on=none > "${out}/cleartoship.json"
+        $CTS "${args[@]}" --markdown --fail-on=none > "${out}/cleartoship.md" || true
         if [ "$INPUT_SARIF" = "true" ]; then
-          $CTS "${args[@]}" --sarif --fail-on=none > results.sarif || true
+          $CTS "${args[@]}" --sarif --fail-on=none > "${out}/results.sarif" || true
+          echo "sarif-file=${out}/results.sarif" >> "$GITHUB_OUTPUT"
         fi
 
         # Counting blocking findings here — off the full report, which carries every
@@ -158,9 +291,10 @@ runs:
         # say. A gate rebuilt from the critical/high outputs alone silently cannot.
         # Fed to node over stdin with a quoted heredoc: nothing here is parsed by
         # bash, so an apostrophe in a comment cannot silently truncate the script.
+        export REPORT="${out}/cleartoship.json"
         node <<'NODE'
         const fs = require("fs");
-        const r = JSON.parse(fs.readFileSync("cleartoship.json", "utf8"));
+        const r = JSON.parse(fs.readFileSync(process.env.REPORT, "utf8"));
         const rank = { critical: 4, high: 3, medium: 2, low: 1, info: 0 };
         const gate = process.env.INPUT_FAIL_ON;
         if (gate !== "none" && !(gate in rank)) {
@@ -170,6 +304,7 @@ runs:
         const blocking = gate === "none"
           ? 0
           : r.findings.filter((f) => rank[f.severity] >= rank[gate]).length;
+        const incomplete = Array.isArray(r.incomplete) ? r.incomplete.length : 0;
         // Written out one by one rather than in a loop, so every declared output
         // stays greppable and the action test can prove each one is produced.
         const out = process.env.GITHUB_OUTPUT;
@@ -180,48 +315,79 @@ runs:
         fs.appendFileSync(out, `low=${r.counts.low}\n`);
         fs.appendFileSync(out, `total=${r.findings.length}\n`);
         fs.appendFileSync(out, `blocking=${blocking}\n`);
+        fs.appendFileSync(out, `incomplete=${incomplete}\n`);
         NODE
 
         # Job summary — always shown on the run.
-        cat cleartoship.md >> "$GITHUB_STEP_SUMMARY"
+        cat "${out}/cleartoship.md" >> "$GITHUB_STEP_SUMMARY"
 
+    # Skipped for pull requests from forks: their token is read-only, so the POST
+    # could only fail. And a comment that fails to post is a warning, never the
+    # job's verdict — the gate below decides that, from the scan itself.
     - name: Comment on pull request
-      if: ${{ inputs.comment == 'true' && github.event_name == 'pull_request' }}
+      if: >-
+        ${{ inputs.comment == 'true' && github.event_name == 'pull_request'
+        && github.event.pull_request.head.repo.full_name == github.repository }}
       shell: bash
-      working-directory: ${{ inputs.working-directory }}
       env:
         GH_TOKEN: ${{ inputs.github-token }}
         PR: ${{ github.event.pull_request.number }}
         REPO: ${{ github.repository }}
+        REPORT_DIR: ${{ steps.scan.outputs.report-dir }}
       run: |
         # A sticky comment: find a previous ClearToShip comment and edit it, so
         # re-runs update in place instead of piling up.
         marker="<!-- cleartoship -->"
-        printf '%s\n\n' "$marker" > body.md
-        cat cleartoship.md >> body.md
+        body="${REPORT_DIR}/body.md"
+        printf '%s\n\n' "$marker" > "$body"
+        cat "${REPORT_DIR}/cleartoship.md" >> "$body"
 
-        id=$(gh api "repos/${REPO}/issues/${PR}/comments" \
-              --jq "map(select(.body | contains(\"$marker\"))) | .[0].id // empty" 2>/dev/null || true)
+        # Only a comment this token wrote, starting with the marker, is ours to
+        # edit: anyone can paste the marker into a comment of their own. The
+        # default GITHUB_TOKEN cannot call /user, so it falls back to the bot
+        # login it posts as; a personal token answers with its own login.
+        # Paginated, because on a long thread the first page need not hold it.
+        me=$(gh api user --jq .login 2>/dev/null || true)
+        [ -n "$me" ] || me="github-actions[bot]"
+        id=$(gh api --paginate "repos/${REPO}/issues/${PR}/comments" \
+              --jq ".[] | select(.user.login == \"${me}\" and (.body | startswith(\"${marker}\"))) | .id" \
+              2>/dev/null | head -n 1 || true)
         if [ -n "$id" ]; then
-          gh api -X PATCH "repos/${REPO}/issues/comments/${id}" -F body=@body.md >/dev/null
+          gh api -X PATCH "repos/${REPO}/issues/comments/${id}" -F body=@"$body" >/dev/null \
+            || echo "::warning::Could not update the ClearToShip PR comment (does the token have pull-requests: write?). The report is in the job summary."
         else
-          gh api -X POST "repos/${REPO}/issues/${PR}/comments" -F body=@body.md >/dev/null
+          gh api -X POST "repos/${REPO}/issues/${PR}/comments" -F body=@"$body" >/dev/null \
+            || echo "::warning::Could not post the ClearToShip PR comment (does the token have pull-requests: write?). The report is in the job summary."
         fi
 
     - name: Upload SARIF
-      if: ${{ inputs.sarif == 'true' && always() }}
-      uses: github/codeql-action/upload-sarif@v4
+      if: ${{ inputs.sarif == 'true' && always() && steps.scan.outputs.sarif-file != '' }}
+      # Pinned to a commit: a composite action's steps run with the caller's
+      # token, and a mutable tag can be re-pointed.
+      uses: github/codeql-action/upload-sarif@1c5b675653bb5c22dbe9b12b556ec555138e09fd # v4.38.1
       with:
-        sarif_file: ${{ inputs.working-directory }}/results.sarif
+        sarif_file: ${{ steps.scan.outputs.sarif-file }}
 
     - name: Apply severity gate
       shell: bash
       env:
         GATE: ${{ inputs.fail-on }}
         BLOCKING: ${{ steps.scan.outputs.blocking }}
+        INCOMPLETE: ${{ steps.scan.outputs.incomplete }}
+        ALLOW_INCOMPLETE: ${{ inputs.allow-incomplete }}
       run: |
+        # The same precedence as the CLI's exit codes: findings at or above the
+        # gate (1) outrank an incomplete scan (3), and `fail-on: none` turns
+        # both off.
         if [ "$BLOCKING" -gt 0 ]; then
           echo "::error::ClearToShip found ${BLOCKING} finding(s) at or above '${GATE}'."
           exit 1
+        fi
+        if [ "${INCOMPLETE:-0}" -gt 0 ]; then
+          if [ "$GATE" != "none" ] && [ "$ALLOW_INCOMPLETE" != "true" ]; then
+            echo "::error::ClearToShip could not finish ${INCOMPLETE} check(s), so finding nothing does not mean clear. The job summary lists what was not read. Set allow-incomplete: true to accept an incomplete scan."
+            exit 3
+          fi
+          echo "::warning::ClearToShip could not finish ${INCOMPLETE} check(s); not failing because of allow-incomplete or fail-on: none."
         fi
         echo "ClearToShip: clear to ship at '${GATE}'."
