@@ -38,8 +38,8 @@ curl -fsSL https://cleartoship.app/cleartoship.mjs -o cleartoship.mjs
 node cleartoship.mjs
 ```
 
-**Free tier costs nothing, no account, no key.** It runs on your machine and
-reports to your terminal — nothing leaves it either way.
+**Every check is free while ClearToShip is in beta — no account, no key.** It
+runs on your machine and reports to your terminal; your code never leaves it.
 
 That is one bundled file with zero dependencies: no package manager in the path
 and nothing for a registry to resolve. **ClearToShip is not distributed through
@@ -87,7 +87,9 @@ dependencies from npm; what it removes is any need for *this package* to be
 published there.
 
 The GitHub Action needs none of them: `action.yml` downloads the release bundle
-for the version its ref declares, and builds from its own checkout if it cannot.
+for the version its ref declares, verifies its build-provenance attestation
+before running it, and builds from its own checkout when that version has no
+verifiable release.
 
 </details>
 
@@ -116,7 +118,7 @@ cries wolf gets ignored.
 
 | Rule | Severity | What it catches |
 | --- | --- | --- |
-| **CTS001** | critical | Server Action / Route Handler mutates the database with no session check |
+| **CTS001** | critical/high/low | Server Action / Route Handler with no session check: **critical** when it visibly writes to the database, **high** when it accepts a mutating method but no write is visible in the handler, **low** on a route that is unauthenticated by design (sign-in, sign-up, password reset, contact/waitlist forms, a logout that reads nothing from the request) |
 | **CTS002** | high | Caller's payload written to the database as an object — every key they sent becomes a column |
 | **CTS003** | critical | `SUPABASE_SERVICE_ROLE_KEY` client built inside a user-reachable action |
 | **CTS004** | medium | Authenticated mutation keyed only on a caller-supplied id (IDOR) |
@@ -221,9 +223,11 @@ could act on. Each list carries a reason per rule in
 `src/scanners/community.ts`. Run `--no-community` to use only ClearToShip's
 rules. See [ATTRIBUTION.md](ATTRIBUTION.md).
 
-Findings map to **OWASP Top 10:2025** and CWE, and the ones that are about an
-LLM or an agent carry an **OWASP Top 10 for LLM Applications** category as well
-(in `meta.llm`). The vendored ruleset labels categories inconsistently —
+Findings map to **OWASP Top 10:2025**, and the ones that are about an LLM or an
+agent carry an **OWASP Top 10 for LLM Applications** category as well (in
+`meta.llm`). ClearToShip's own rules and the gitleaks-derived credential rules
+also name a **CWE**; the vendored GuardVibe rules do not, because upstream
+publishes none and inventing one per rule would be a guess presented as a fact. The vendored ruleset labels categories inconsistently —
 Injection arrives as both `A02:2025` and `A03:2025`, Security Misconfiguration
 as `A05:2025` and `A05:2021` — so labels are normalised to one taxonomy on the
 way out, with the original kept in `meta.owaspUpstream`.
@@ -313,6 +317,29 @@ node cleartoship.mjs --no-gitignore      # also scan what .gitignore excludes
 node cleartoship.mjs --markdown          # markdown report (PR comments / summaries)
 ```
 
+Every flag:
+
+| Flag | Default | What it does |
+| --- | --- | --- |
+| `[paths...]` | whole project | Files or directories to scan. A single directory outside the current one is treated as the project root. |
+| `-C, --cwd <dir>` | current directory | Project root: framework detection, `.gitignore` and reported paths all hang off it. |
+| `--fail-on <severity>` | `critical` | Exit 1 when any finding is at or above `critical`, `high`, `medium` or `low`. `none` always exits 0. |
+| `--allow-incomplete` | off | Exit 0 instead of 3 when a check could not finish (see [Exit codes](#exit-codes)). |
+| `--min-severity <severity>` | `low` | Hide findings below `critical`, `high`, `medium`, `low` or `info`. Display only: it is clamped to `--fail-on`, so it can quieten a report but never hide what fails the build. |
+| `--only <ids>` | all | Comma-separated rule ids to report exclusively, e.g. `CTS001,CTS010`. |
+| `--ignore <ids>` | none | Comma-separated rule ids to skip. |
+| `--offline` | off | No network at all: no registry or OSV lookups. |
+| `--no-community` | off | Only ClearToShip's own rules; skip the vendored community ruleset. |
+| `--no-gitignore` | off | Also scan what `.gitignore` excludes. |
+| `--json` / `--sarif` / `--markdown` | terminal report | Machine-readable JSON, SARIF 2.1.0, or a markdown report. |
+| `--fix-prompt` | — | A ready-to-paste prompt for Cursor / Claude Code instead of the report. |
+| `--badge` | — | Print the markdown status badge for your README. |
+| `-o, --output <file>` | stdout | Write the chosen output to a file. |
+| `--no-banner` | banner shown | Suppress the ASCII header. |
+| `--quiet` | off | Terminal report lists findings only, not the checks that passed. |
+| `--verbose` | off | Extra diagnostic output. |
+| `-v, --version` | — | Print the version. |
+
 Suppress a single finding inline:
 
 ```ts
@@ -334,6 +361,23 @@ Two lines in any workflow, on any CI — no package manager and no registry:
       - run: curl -fsSL https://cleartoship.app/cleartoship.mjs -o cleartoship.mjs
       - run: node cleartoship.mjs --fail-on=critical
 ```
+
+In CI you usually want the pinned, verified form: a versioned release URL, so
+the build does not change under you, and the file's GitHub build-provenance
+attestation checked before it runs (every release after 0.13.10 carries one):
+
+```yaml
+      - run: |
+          curl -fsSL https://github.com/murtazaozdemir/cleartoship/releases/download/v0.13.10/cleartoship.mjs -o cleartoship.mjs
+          gh attestation verify cleartoship.mjs --repo murtazaozdemir/cleartoship
+        env: { GH_TOKEN: "${{ github.token }}" }
+      - run: node cleartoship.mjs --fail-on=critical
+```
+
+The gate exits 1 on findings at or above `--fail-on`, and 3 when the scan could
+not finish (a registry outage, a file that would not parse) — add
+`--allow-incomplete` if an incomplete scan should pass. See
+[Exit codes](#exit-codes).
 
 To feed findings into GitHub's Security tab:
 
@@ -377,48 +421,75 @@ jobs:
 | `offline` | `false` | Skip registry and OSV lookups |
 | `working-directory` | `.` | Directory to scan from |
 | `version` | *(matches the action ref)* | Release to run: a version number, `latest` for the newest release, or `local` to build from the checkout |
+| `allow-incomplete` | `false` | Pass the job even when a check could not finish. By default an incomplete scan fails the job, like the CLI's exit 3 |
+| `github-token` | `${{ github.token }}` | Token for verifying the release bundle's attestation and posting the PR comment |
 
-Outputs `verdict` (`clear`/`conditional`/`hold`; `conditional` is also what a
-run gets when a check could not complete, even with no findings), the
-per-severity counts `critical`, `high`, `medium`, `low`, plus `total` and
-`blocking` (findings at or above `fail-on`) for use in later steps. The comment is *sticky* — re-runs edit
-the same comment instead of piling up.
+Outputs `resolved` (`release` — the attested release bundle ran — or `checkout`
+— the action built its own source), `verdict` (`clear`/`conditional`/`hold`;
+`conditional` is also what a run gets when a check could not complete, even
+with no findings), the per-severity counts `critical`, `high`, `medium`, `low`,
+plus `total`, `blocking` (findings at or above `fail-on`) and `incomplete`
+(checks that could not finish), and the paths `report-json`,
+`report-markdown` and `sarif-file`. Reports are written under `$RUNNER_TEMP`,
+never into your checkout. The comment is *sticky* — re-runs edit the same
+comment instead of piling up — and is skipped on pull requests from forks,
+whose token cannot write one; the report is in the job summary either way.
+
+The job fails with findings at or above `fail-on`, or — when nothing blocks —
+if the scan was incomplete and `allow-incomplete` is not set. `fail-on: none`
+turns both off.
 
 By default the action runs the release bundle for the version its own ref
 declares, so `@v0.13.10` runs ClearToShip 0.13.10 and pinning the ref pins the
-behaviour. If that release has no bundle, it builds from its own checkout
-instead, so `uses: …@ref` works against an unreleased commit. It never fetches or
-runs anything from the npm registry under ClearToShip's name.
+behaviour. Before running a downloaded bundle it verifies the bundle's GitHub
+build-provenance attestation (`gh attestation verify`: built by this
+repository's release workflow, from that version's tag) and that it reports
+the expected version; a bundle that fails either check fails the job rather
+than being swapped for something else. Releases from before attestations
+existed (0.13.10 and earlier) are never downloaded — the action builds its own
+checkout of that version instead. If the version has no release yet, it builds
+from its own checkout too, so `uses: …@ref` works against an unreleased commit.
+It never fetches or runs anything from the npm registry under ClearToShip's
+name.
 
 ## How it works
 
-Six scanners, all static: your source is read and parsed, never executed, never
-uploaded, and no database is connected to.
+Seven scanners, all static: your source is read and parsed, never executed, never
+uploaded, and no database is connected to. They run in this order, and each
+only when it applies to the project (a repo with no Next.js or SQL skips those).
 
-1. **Server Actions & Route Handlers** — parses TS/TSX with Babel, finds every exported
+1. **Dependencies** — resolves every declared dependency against npm and PyPI,
+   flagging names that do not exist at all, names registered days ago with no users, and names
+   one edit away from a popular package. Registry answers are cached for 24h under
+   `~/.cache/cleartoship`. Then **known vulnerabilities**: dependency versions are resolved from
+   `package-lock.json` / `pnpm-lock.yaml` / `yarn.lock` (falling back to the range floor)
+   and queried against OSV.dev, the database behind Google's `osv-scanner` — live, never
+   cached. Live data beats hand-written version regexes, which go stale the week they are
+   written — so when OSV answers, the vendored CVE rules stand down. `--offline` reverses that.
+2. **Server Actions & Route Handlers** — parses TS/TSX with Babel, finds every exported
    function reachable over HTTP (`'use server'` modules, inline directives, `app/**/route.ts`
    method exports), then asks whether it authenticates, validates and scopes its writes.
    Recognises `next-safe-action` / `zsa` style wrappers so wrapped actions are not
    double-reported.
-2. **Row Level Security** — replays your `.sql` migrations in filename order to build a model
+3. **Row Level Security** — replays your `.sql` migrations in filename order to build a model
    of the resulting schema (tables, columns, RLS state, policies, grants, views, functions),
    then judges the end state. This is the same class of check as Supabase's own `splinter`
    linter, but static, so it runs on a pull request with no live database.
-3. **Dependency hallucination** — resolves every declared dependency against npm and PyPI,
-   flagging names that do not exist at all, names registered days ago with no users, and names
-   one edit away from a popular package. Results are cached for 24h under
-   `~/.cache/cleartoship`.
 4. **Secrets & client boundary** — pattern plus verification: candidate JWTs are decoded and
    only reported when the payload actually says `role: service_role`. 15 hand-tuned patterns
    cover the providers that matter most; 219 more come from the vendored gitleaks ruleset,
    each gated on a keyword prefilter and a Shannon entropy threshold so that
    `your_api_key_here` never reads as a breach. Values in test fixtures, docs and
    commented-out counter-examples are downgraded rather than reported.
-5. **Known vulnerabilities** — dependency versions are resolved from
-   `package-lock.json` / `pnpm-lock.yaml` / `yarn.lock` (falling back to the range floor)
-   and queried against OSV.dev, the database behind Google's `osv-scanner`. Live data
-   beats hand-written version regexes, which go stale the week they are written — so when
-   OSV answers, the vendored CVE rules stand down. `--offline` reverses that.
+5. **Logging, exception-handling & deserialization** — CTS070–072: secrets, PII or a whole
+   request body written to a log; a security check that fails open or swallows its error;
+   untrusted data handed to `pickle.loads`, `unserialize` or an unsafe YAML loader.
+6. **LLM & agent risk** — CTS080–085: collects every binding that holds what a model
+   returned and follows it into the sinks that would run or trust it, and reads each agent
+   tool's body for an irreversible action with no approval step. See the design notes below.
+7. **Community ruleset** — the 435 vendored GuardVibe rules that remain after the
+   superseded and withheld ones are taken out, over the ground the AST scanners do not
+   cover (Dockerfiles, Terraform, GitHub Actions, MCP runtimes, Go, shell).
 
 ### Design notes
 
@@ -427,8 +498,12 @@ uploaded, and no database is connected to.
   failed is not a check that passed. The report counts what was actually looked up ("0 of 3
   packages checked"), says why as a warning, and the verdict is `conditional` — never `clear` —
   for any run in which a check could not complete (npm/PyPI or OSV unreachable, a scanner that
-  threw, a path that was not there). The JSON `incomplete` array lists the reasons. The exit code
-  still follows `--fail-on`, so an outage does not break your build.
+  threw, a path that was not there, a file that could not be parsed or read). The JSON
+  `incomplete` array lists the reasons, and the exit code is **3** unless `--allow-incomplete`
+  is passed: a build that was gated on "no findings" should not pass on a scan that did not
+  finish. Findings at or above `--fail-on` still exit 1 first, and `--fail-on none` exits 0.
+  If you would rather an npm or OSV outage never blocks a deploy, pass `--allow-incomplete`
+  (the report still says what was not checked) or run `--offline`.
 - **Test fixtures are not breaches.** Credentials under `tests/`, `fixtures/`, `docs/` or in a
   commented-out line are reported at `low`, never as blocking criticals.
 - **Where a file lives changes what a finding costs.** CTS024 already separated a
@@ -457,9 +532,16 @@ uploaded, and no database is connected to.
 - **The scan stays inside the directory you pointed at.** A symlink that
   resolves outside the scan root is not followed. It sounds academic until you
   run this in CI on a pull request: `vendor-config -> /home/runner/.ssh` would
-  otherwise be read, and quoted, into a public comment. Symlink loops are walked
-  once rather than a dozen times, and the report says how many links were
-  refused.
+  otherwise be read, and quoted, into a public comment. Every read is checked
+  the same way — the file's real path must sit under the scan root — so a link
+  the walk did not see (a manifest, an ignore file) cannot escape either.
+  Symlink loops are walked once rather than a dozen times, and the report says
+  how many links were refused.
+- **A report is safe to post.** Anything that looks like a secret is redacted
+  in every snippet, whichever rule found it, and text that came from the
+  repository (file names, matched lines) is escaped in the markdown and
+  terminal output, so a file named to look like markup or a terminal escape
+  sequence cannot rewrite the PR comment or your terminal.
 - **A match in a comment is prose about code, not code.** The scanner lexes each
   file once for strings and comments — properly, tracking quotes, so a URL
   inside a string is not mistaken for the start of one — and a community rule
@@ -488,7 +570,9 @@ uploaded, and no database is connected to.
   84 seconds to 2. `.env` files are the deliberate exception, since a secret on
   your disk is a secret either way and CTS032 exists to check that the file *is*
   ignored. `--no-gitignore` scans everything, and the report always says how many
-  paths were skipped.
+  paths were skipped. A file git already tracks is scanned whatever `.gitignore`
+  says: the scanner reads `.git/index`, so a pull request cannot hide a
+  committed file from the scan by adding an ignore rule for it.
 - **Auth is followed into the helper it lives in.** Almost no real app repeats the
   session check inside every action — it resolves in `lib/auth.ts`, or in a
   framework helper such as Shopify's `handleSessionToken`, and each action calls
@@ -534,11 +618,11 @@ version, including how to report a vulnerability.
 - **Your code is never executed.** No `child_process`, no `eval`, no dynamic
   import of a scanned file. Everything is text, an AST and regexes — which is
   also why it is safe to point at a repository you have not read yet.
-- **No source leaves the machine.** Online, three hosts are contacted and they
-  receive package **names and versions** only: `registry.npmjs.org` /
-  `api.npmjs.org`, `pypi.org`, `api.osv.dev`. No file contents, no paths, no
-  project name. `--offline` disables all three and makes a run a pure local
-  computation.
+- **No source leaves the machine.** Online, four hosts are contacted:
+  `registry.npmjs.org`, `api.npmjs.org` and `pypi.org` receive package
+  **names**, and `api.osv.dev` receives package **names and versions**. No file
+  contents, no paths, no project name. `--offline` disables all four and makes a
+  run a pure local computation.
 - **Nothing is loaded by name at run time.** Every scanner is compiled into the
   build you run. ClearToShip never imports a module it finds next to it or in the
   project's `node_modules`, so scanning a repository cannot run that repository's
@@ -571,9 +655,10 @@ the CLI's JSON output.
 
 | Code | Meaning |
 | --- | --- |
-| `0` | Clear to ship at the configured `--fail-on` threshold |
-| `1` | Findings at or above the threshold |
-| `2` | The scanner itself errored |
+| `0` | Clear to ship at the configured `--fail-on` threshold, and every check finished (or `--allow-incomplete` was passed). `--fail-on none` always exits 0. |
+| `1` | Findings at or above the threshold. Takes precedence over 3. |
+| `2` | The scanner itself crashed (bad arguments, an unexpected error) |
+| `3` | Nothing at or above the threshold, but the scan is incomplete: a check could not finish — a file that failed to parse or could not be read, a registry or OSV outage, a scanner that threw, a file too large for a ruleset. The report's `incomplete` list says what. `--allow-incomplete` turns this into 0. |
 
 ## Prior art, and what was taken from where
 

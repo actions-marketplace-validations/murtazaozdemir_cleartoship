@@ -189,9 +189,9 @@
       </p>
       <div class="callout">
         <b>You don't need to know security to use the results.</b> Every finding names the exact
-        file and line, explains what's wrong in one sentence, and — for the checks the free tier
-        covers — <code>--fix-prompt</code> turns it into an instruction you can hand straight back
-        to whatever AI tool wrote the code.
+        file and line, explains what's wrong in one sentence, and <code>--fix-prompt</code> turns
+        it into an instruction you can hand straight back to whatever AI tool wrote the code —
+        for every check, all of which are free while ClearToShip is in beta.
       </div>
     </div>
   </section>
@@ -339,9 +339,11 @@
         <div class="qa">
           <h3>Does it upload my code anywhere?</h3>
           <p>No. It runs entirely on your machine or CI runner and reads your files locally. The
-          only network calls it makes (and only when you're online) are anonymous lookups of
-          package <em>names</em> — never file contents, never your code — to check whether a
-          dependency exists and is safe. <code>--offline</code> turns even that off. See
+          only network calls it makes (and only when you're online) are anonymous package
+          lookups — never file contents, never your code, never a path. npm and PyPI get a
+          package's <em>name</em>, to check that it exists and isn't brand new or pulled for
+          malware; OSV.dev gets its <em>name and version</em>, to look up known
+          vulnerabilities. <code>--offline</code> turns all of it off. See
           <a href="https://github.com/murtazaozdemir/cleartoship/blob/main/SECURITY.md">SECURITY.md</a>
           for exactly what leaves your machine and how to verify it yourself.</p>
         </div>

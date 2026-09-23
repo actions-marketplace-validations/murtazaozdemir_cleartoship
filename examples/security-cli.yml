@@ -6,6 +6,7 @@
 # comments, typed outputs.)
 name: ClearToShip
 
+# `pull_request`, never `pull_request_target`: see examples/security.yml.
 on:
   pull_request:
   push:
@@ -20,28 +21,40 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
       - uses: actions/setup-node@v7
         with:
           node-version: 22
 
-      # One bundled file, zero dependencies. The checksum catches a truncated or
-      # corrupted download; it comes from the same host, so it does not defend
-      # against that host being compromised.
-      - name: Fetch ClearToShip
+      # One bundled file, zero dependencies. A versioned URL, so the build does
+      # not change under you between runs, and its GitHub build-provenance
+      # attestation is verified before it runs: that proves it was built by
+      # ClearToShip's own release workflow, which a checksum fetched from the
+      # same host cannot. (Every release after 0.13.10 carries an attestation.)
+      # On another CI, install the GitHub CLI or drop the verify line and check
+      # https://cleartoship.app/SHA256SUMS instead.
+      - name: Fetch and verify ClearToShip
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
-          curl -fsSL https://cleartoship.app/cleartoship.mjs -o cleartoship.mjs
-          curl -fsSL https://cleartoship.app/SHA256SUMS | grep ' cleartoship.mjs$' | sha256sum -c -
+          curl -fsSL https://github.com/murtazaozdemir/cleartoship/releases/download/v0.13.10/cleartoship.mjs -o cleartoship.mjs
+          gh attestation verify cleartoship.mjs --repo murtazaozdemir/cleartoship
 
       # Write the report for the Security tab, and don't fail on this step —
-      # the gate is the second run, so a finding is visible in the UI even when
+      # the gate is the next run, so a finding is visible in the UI even when
       # it blocks the build.
       - run: node cleartoship.mjs --sarif -o cleartoship.sarif --fail-on=none
       - uses: github/codeql-action/upload-sarif@v4
         with:
           sarif_file: cleartoship.sarif
 
-      # The gate. Registry and OSV answers are cached for 24h, so the second
-      # pass re-parses locally and makes no network calls.
+      # The gate. Exit 1: findings at or above --fail-on. Exit 3: nothing
+      # blocking, but a check could not finish (a registry or OSV outage, a
+      # file that would not parse), so "nothing found" is not "clear"; add
+      # --allow-incomplete if that should pass. This second pass re-parses
+      # locally; npm and PyPI answers come from the 24h cache the first run
+      # filled, but OSV is not cached, so it is queried again.
       - run: node cleartoship.mjs --fail-on=critical
 
       # Optional: put the human-readable report in the job summary.

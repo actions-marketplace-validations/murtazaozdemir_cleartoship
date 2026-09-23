@@ -5,6 +5,12 @@
 # same job with one downloaded file and `node`.
 name: ClearToShip
 
+# `pull_request`, never `pull_request_target`. With pull_request_target the job
+# runs with this repository's write token and secrets while checking out the
+# pull request's code, so anyone who opens a PR controls what runs next to them.
+# On a fork PR, plain `pull_request` gets a read-only token: the Action then
+# skips the PR comment (the report is still in the job summary) and the scan and
+# gate run as normal.
 on:
   pull_request:
   push:
@@ -20,13 +26,20 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
       # cleartoship needs Node ^22.18 (Babel 8). Pin it rather than inheriting
       # whatever the runner image happens to ship this month.
       - uses: actions/setup-node@v7
         with:
           node-version: 22
+      # The Action verifies the release bundle's build-provenance attestation
+      # before running it, and fails rather than run one that does not verify.
       - uses: murtazaozdemir/cleartoship@v0.13.10
         with:
           fail-on: critical   # block the PR only on criticals
           comment: true        # post a summary comment on the PR
           sarif: true          # also upload to the Security tab
+          # An incomplete scan (a registry outage, a file that would not parse)
+          # fails the job by default. Uncomment to let it pass with a warning.
+          # allow-incomplete: true

@@ -4,7 +4,7 @@
 its own taxonomy. This page explains what those lists are, who publishes them,
 and what each category means. For **what ClearToShip actually detects** in each
 category — the honest, category-by-category coverage — see the two tables in
-[README.md](../README.md#owasp-top-10:2025-coverage--honest-version) instead;
+[README.md](../README.md#owasp-top-102025-coverage--honest-version) instead;
 this page is background on the standards themselves, not a coverage claim.
 
 ## Who publishes these
@@ -69,7 +69,11 @@ citation like "LLM06: Excessive Agency" is stale — it's LLM03 now.
 
 Every finding — first-party or vendored — gets normalized onto exactly one
 `OWASP_2025` category, and the ones that are about an LLM or agent get a second,
-independent `OWASP_LLM` category alongside it (`meta.llm`). The mapping is
+independent `OWASP_LLM` category alongside it (`meta.llm`). A CWE is a separate
+matter: ClearToShip's own rules and the gitleaks-derived credential rules each
+name one (`cwe`), while vendored GuardVibe findings carry none, because
+upstream publishes none and this project does not invent one per rule. The
+OWASP mapping is
 derived from each rule's own wording, not a hand-kept id list, and is
 deliberately conservative: a rule that doesn't clearly belong to a category
 gets none rather than a guess. The original upstream label — which is not
