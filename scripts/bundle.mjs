@@ -13,7 +13,7 @@
  * fallback that behaves differently from the tool you tested is not a fallback.
  */
 import { build } from 'esbuild';
-import { readFileSync, writeFileSync, mkdirSync, rmSync, copyFileSync } from 'node:fs';
+import { readFileSync, writeFileSync, mkdirSync, rmSync, copyFileSync, cpSync, readdirSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -24,6 +24,36 @@ const pkg = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8'));
 rmSync(out, { recursive: true, force: true });
 mkdirSync(join(out, 'bin'), { recursive: true });
 
+// The full licence texts, embedded as a legal comment at the top of the bundle.
+// `cleartoship.mjs` is also distributed as a bare file — curled from
+// cleartoship.app with nothing beside it — and the MIT and Apache-2.0 licences
+// of the code vendored into it (gitleaks, GuardVibe) require their notices to
+// travel with every copy. A file that ships alone has to carry them itself.
+const legalFiles = [
+  'LICENSE',
+  ...readdirSync(join(root, 'LICENSES'))
+    .sort()
+    .map((f) => `LICENSES/${f}`),
+];
+const legalBanner =
+  '/*!\n' +
+  ` * ${pkg.name} ${pkg.version} (${pkg.homepage})\n` +
+  ' * Licence texts for this file and the code vendored into it; see ATTRIBUTION.md.\n' +
+  legalFiles
+    .map(
+      (f) =>
+        ` *\n * ===== ${f} =====\n *\n` +
+        readFileSync(join(root, f), 'utf8')
+          .replace(/\*\//g, '* /')
+          .trimEnd()
+          .split('\n')
+          .map((line) => ` * ${line}`.trimEnd())
+          .join('\n') +
+        '\n',
+    )
+    .join('') +
+  ' */';
+
 const result = await build({
   entryPoints: [join(root, 'src/cli.ts')],
   bundle: true,
@@ -31,12 +61,16 @@ const result = await build({
   format: 'esm',
   target: 'node22.18',
   outfile: join(out, 'bin/cleartoship.mjs'),
-  // No `banner` with a shebang here: esbuild preserves the one already at the
-  // top of src/cli.ts, and a second on line 2 is a syntax error, not a comment.
+  // No shebang in the banner: esbuild preserves the one already at the top of
+  // src/cli.ts and places the banner after it, and a second shebang on line 2
+  // is a syntax error, not a comment.
+  banner: { js: legalBanner },
   legalComments: 'inline',
   metafile: true,
-  // Bundled dependencies keep their licences with them; LICENSES/ and
-  // ATTRIBUTION.md ship alongside, as they do in the npm package.
+  // Bundled dependencies keep their licences with them (legalComments), the
+  // banner carries this project's and the vendored rulesets' texts, and in the
+  // standalone tarball LICENSES/ and ATTRIBUTION.md also ship alongside, as they
+  // do in the npm package.
   define: {
     'process.env.CLEARTOSHIP_STANDALONE': '"1"',
     // Stamped in because the raw single file has no package.json beside it to
@@ -62,7 +96,7 @@ writeFileSync(
       // directory for the release step to pick up, and without a `files` list
       // npm packs it too — shipping the 2 MB bundle twice and doubling the
       // download for nothing.
-      files: ['bin', 'README.md', 'LICENSE', 'ATTRIBUTION.md', 'SECURITY.md'],
+      files: ['bin', 'README.md', 'LICENSE', 'LICENSES', 'ATTRIBUTION.md', 'SECURITY.md'],
       engines: pkg.engines,
       repository: pkg.repository,
       homepage: pkg.homepage,
@@ -77,6 +111,7 @@ writeFileSync(
 for (const file of ['README.md', 'LICENSE', 'ATTRIBUTION.md', 'SECURITY.md']) {
   copyFileSync(join(root, file), join(out, file));
 }
+cpSync(join(root, 'LICENSES'), join(out, 'LICENSES'), { recursive: true });
 
 // The same file, at the top level, is the artifact for the install path that
 // involves no package manager at all: curl it and run it with node. npm 12
