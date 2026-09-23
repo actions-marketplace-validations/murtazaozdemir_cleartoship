@@ -3,7 +3,10 @@ import {
   parseSource, calleeName, calleeTail, hasDirective,
   traverse, buildModuleIndex, Suppressions, emptyResult,
 } from '../internal.js';
-import { authNamesFor, CREDENTIAL_HEADERS, SECRET_ENV } from './auth-helpers.js';
+import {
+  authHelpersFor, isAccessorOnly, isUserLookup, CREDENTIAL_HEADERS, SECRET_ENV, SUPABASE_GET_SESSION,
+} from './auth-helpers.js';
+import type { ModuleAuth } from './auth-helpers.js';
 import { inertNamesFor } from './effects.js';
 import type { Finding, ProjectContext, ScanResult, Scanner } from '../internal.js';
 
@@ -112,6 +115,53 @@ const MUTATION_CALLS = new Set([
   'findOneAndDelete', 'updateOne', 'updateMany', 'deleteOne', 'insertOne',
   'insertMany', 'replaceOne', 'bulkWrite', 'increment', 'decrement',
 ]);
+
+/**
+ * A mutation verb called on something that only lives in this process. `update` on a
+ * hash (`createHash('md5').update(email).digest('hex')`), `delete` on a `Set` or `Map`
+ * built here, `Object.create(null, …)`: each matched MUTATION_CALLS by its last segment
+ * and was reported as a database write, which it is nowhere near.
+ */
+const IN_PROCESS_CTORS = /^(Set|Map|WeakSet|WeakMap|URLSearchParams|Headers|FormData|URL|Array)$/;
+const CRYPTO_OBJECT_CALL = /(^|\.)(createHash|createHmac|createCipheriv|createDecipheriv|createSign|createVerify)$/;
+const CRYPTO_CHAIN = /(^|\.)(createHash|createHmac|createCipheriv|createDecipheriv|createSign|createVerify)\./;
+const JS_BUILTIN_ROOT = /^(Object|Reflect|Array|Promise|JSON|Math|Date|Symbol|Number|String|Intl|Map|Set|WeakMap|WeakSet)\./;
+
+/** `new Set(...)`, `createHash('sha256')`: an initializer whose value never leaves the process. */
+function isInProcessValue(init: any): boolean {
+  let cur = init;
+  while (cur && (cur.type === 'AwaitExpression' || cur.type === 'TSNonNullExpression' || cur.type === 'TSAsExpression')) {
+    cur = cur.argument ?? cur.expression;
+  }
+  if (!cur) return false;
+  if (cur.type === 'NewExpression') return IN_PROCESS_CTORS.test(calleeName(cur.callee));
+  if (cur.type === 'CallExpression') {
+    const full = calleeName(cur.callee);
+    return CRYPTO_OBJECT_CALL.test(full) || CRYPTO_CHAIN.test(full + '.');
+  }
+  return false;
+}
+
+/** Names bound, anywhere in `root`, to one of those in-process values. */
+function inProcessNames(root: any): Set<string> {
+  const names = new Set<string>();
+  someNode(root, (n) => {
+    if (n.type === 'VariableDeclarator' && n.id?.type === 'Identifier' && isInProcessValue(n.init)) names.add(n.id.name);
+    return false;
+  });
+  return names;
+}
+
+/** True when a mutation-verb call writes to an in-process value, not a data store. */
+function isInProcessMutation(call: any, local: ReadonlySet<string>): boolean {
+  const callee = call.callee;
+  const full = calleeName(callee);
+  if (JS_BUILTIN_ROOT.test(full) || CRYPTO_CHAIN.test(full)) return true;
+  if (callee?.type !== 'MemberExpression' && callee?.type !== 'OptionalMemberExpression') return false;
+  const receiver = callee.object;
+  if (receiver?.type === 'Identifier') return local.has(receiver.name);
+  return isInProcessValue(receiver);
+}
 
 /** Runtime schema validation. Absence of all of these on a parameterised action is a finding. */
 const VALIDATION_CALLS = new Set([
@@ -391,6 +441,256 @@ function isUnauthorisedExit(n: any): boolean {
   return false;
 }
 
+/*
+ * Where an auth check sits, not only whether one appears. An auth call used to count
+ * wherever it was in the function: after the write (`await db.post.delete(); await
+ * auth()`), inside a closure nothing calls, or inside `if (process.env.NODE_ENV ===
+ * 'test')`, which production never enters. Each of those was reported as authenticated.
+ * What follows works out, for a node inside the analysed function, the position in the
+ * enclosing function at which that code actually runs.
+ */
+
+/** Code that provably never runs: a local function nothing references. */
+const NEVER_RUNS = Number.POSITIVE_INFINITY;
+
+/**
+ * Where, in `scope`'s own body, the code at `p` runs: its own position if no function
+ * stands between them, otherwise where that function is invoked.
+ */
+function runPosition(p: any, scope: any, depth = 0): number {
+  let cur = p.parentPath;
+  while (cur && cur.node !== scope.node) {
+    if (cur.isFunction()) return functionRunPosition(cur, scope, depth);
+    cur = cur.parentPath;
+  }
+  // The END of the node: a call runs once its arguments are evaluated, so a check
+  // written inside the write's own arguments — `delete({ where: { authorId: (await
+  // requireUser()).id } })` — runs before it.
+  return p.node.end ?? 0;
+}
+
+function functionRunPosition(fn: any, scope: any, depth: number): number {
+  // Deep indirection: fall back to where the function is written, as before.
+  if (depth > 6) return fn.node.start ?? 0;
+  const parent = fn.parentPath;
+  const pn = parent?.node;
+  // `(async () => { ... })()`, and a callback handed to a call (`$transaction(async
+  // (tx) => ...)`, `items.map(...)`): runs where that call is evaluated.
+  if (pn && (pn.type === 'CallExpression' || pn.type === 'OptionalCallExpression' || pn.type === 'NewExpression')) {
+    return runPosition(parent, scope, depth + 1);
+  }
+  let name: string | null = null;
+  if (fn.node.type === 'FunctionDeclaration' && fn.node.id) name = fn.node.id.name;
+  else if (pn?.type === 'VariableDeclarator' && pn.id?.type === 'Identifier' && pn.init === fn.node) name = pn.id.name;
+  if (!name) return fn.node.start ?? 0;
+  // A named local function runs where it is first called or handed to a call.
+  const binding = parent.scope?.getBinding?.(name);
+  const refs = (binding?.referencePaths ?? []).filter(
+    (r: any) => !r.findParent((q: any) => q.node === fn.node) && r.findParent((q: any) => q.node === scope.node),
+  );
+  if (refs.length === 0) return NEVER_RUNS;
+  let best = NEVER_RUNS;
+  for (const r of refs) {
+    const rp = r.parentPath;
+    const t = rp?.node?.type;
+    const at = t === 'CallExpression' || t === 'OptionalCallExpression' || t === 'NewExpression' ? rp : r;
+    best = Math.min(best, runPosition(at, scope, depth + 1));
+  }
+  return best;
+}
+
+/** The innermost function (at or inside `root`) that contains both paths. */
+function commonFunction(a: any, b: any, root: any): any {
+  const chain = (p: any): any[] => {
+    const out: any[] = [];
+    let cur = p.parentPath;
+    while (cur) {
+      if (cur.isFunction()) {
+        out.push(cur);
+        if (cur.node === root.node) break;
+      }
+      cur = cur.parentPath;
+    }
+    return out;
+  };
+  const inB = new Set(chain(b).map((p) => p.node));
+  for (const f of chain(a)) if (inB.has(f.node)) return f;
+  return root;
+}
+
+/** `process.env.NODE_ENV === 'test'`, evaluated for production: true, false, or unknown. */
+function whenProduction(expr: any, scopePath: any, depth = 0): boolean | undefined {
+  if (!expr || depth > 6) return undefined;
+  switch (expr.type) {
+    case 'TSAsExpression':
+    case 'TSNonNullExpression':
+    case 'ParenthesizedExpression':
+      return whenProduction(expr.expression, scopePath, depth + 1);
+    case 'BooleanLiteral':
+      return expr.value;
+    case 'UnaryExpression': {
+      if (expr.operator !== '!') return undefined;
+      const v = whenProduction(expr.argument, scopePath, depth + 1);
+      return v === undefined ? undefined : !v;
+    }
+    case 'LogicalExpression': {
+      const l = whenProduction(expr.left, scopePath, depth + 1);
+      const r = whenProduction(expr.right, scopePath, depth + 1);
+      if (expr.operator === '&&') return l === false || r === false ? false : l === true && r === true ? true : undefined;
+      if (expr.operator === '||') return l === true || r === true ? true : l === false && r === false ? false : undefined;
+      return undefined;
+    }
+    case 'BinaryExpression': {
+      if (!['===', '==', '!==', '!='].includes(expr.operator)) return undefined;
+      const isEnv = (n: any) => /(^|\.)env\.NODE_ENV$/.test(calleeName(n));
+      const lit = isEnv(expr.left) ? expr.right : isEnv(expr.right) ? expr.left : null;
+      if (lit?.type !== 'StringLiteral') return undefined;
+      const equal = lit.value === 'production';
+      return expr.operator === '===' || expr.operator === '==' ? equal : !equal;
+    }
+    case 'MemberExpression': {
+      // Set only by a test runner.
+      if (/(^|\.)env\.(VITEST|JEST_WORKER_ID)$/.test(calleeName(expr))) return false;
+      return undefined;
+    }
+    case 'Identifier': {
+      // `const isTest = process.env.NODE_ENV === 'test'`, here or at module scope.
+      const binding = scopePath?.scope?.getBinding?.(expr.name);
+      if (binding?.kind !== 'const' || binding.path?.node?.type !== 'VariableDeclarator') return undefined;
+      return whenProduction(binding.path.node.init, binding.path, depth + 1);
+    }
+    default:
+      return undefined;
+  }
+}
+
+/** True when `p` sits in a branch that production provably never takes. */
+function skippedInProduction(p: any, root: any): boolean {
+  let child = p;
+  let cur = p.parentPath;
+  while (cur && child.node !== root.node) {
+    const n = cur.node;
+    if (n.type === 'IfStatement' || n.type === 'ConditionalExpression') {
+      const taken = whenProduction(n.test, cur);
+      if (child.node === n.consequent && taken === false) return true;
+      if (child.node === n.alternate && taken === true) return true;
+    } else if (n.type === 'LogicalExpression' && child.node === n.right) {
+      const left = whenProduction(n.left, cur);
+      if (n.operator === '&&' && left === false) return true;
+      if (n.operator === '||' && left === true) return true;
+    }
+    child = cur;
+    cur = cur.parentPath;
+  }
+  return false;
+}
+
+/** A statement that leaves the function: return, throw, `redirect()`, a block ending in one. */
+function exits(stmt: any): boolean {
+  if (!stmt) return false;
+  if (stmt.type === 'ReturnStatement' || stmt.type === 'ThrowStatement') return true;
+  if (stmt.type === 'BlockStatement') return exits(stmt.body[stmt.body.length - 1]);
+  if (stmt.type === 'ExpressionStatement') {
+    let e = stmt.expression;
+    if (e?.type === 'AwaitExpression') e = e.argument;
+    return e?.type === 'CallExpression' && /^(redirect|permanentRedirect|notFound)$/.test(calleeName(e.callee));
+  }
+  return false;
+}
+
+/**
+ * `const session = await auth(); if (session) return` — the result is used only to turn
+ * *signed-in* callers away, so everyone without a session falls through to the write.
+ * True when every use of the bound result is a truthy test whose branch exits.
+ */
+function onlyInvertedGuard(call: any): boolean {
+  let cur = call;
+  while (cur.parentPath && /^(AwaitExpression|TSNonNullExpression|TSAsExpression|ParenthesizedExpression)$/.test(cur.parentPath.node.type)) {
+    cur = cur.parentPath;
+  }
+  const decl = cur.parentPath;
+  if (decl?.node?.type !== 'VariableDeclarator' || decl.node.init !== cur.node) return false;
+  const refs: any[] = [];
+  for (const name of parameterNames([decl.node.id])) {
+    refs.push(...(decl.scope?.getBinding?.(name)?.referencePaths ?? []));
+  }
+  if (refs.length === 0) return false;
+  return refs.every((ref) => {
+    let e = ref;
+    // `session.user`, `session?.user?.id`
+    while (
+      (e.parentPath?.node.type === 'MemberExpression' || e.parentPath?.node.type === 'OptionalMemberExpression') &&
+      e.parentPath.node.object === e.node
+    ) {
+      e = e.parentPath;
+    }
+    const pn = e.parentPath?.node;
+    if (pn?.type === 'UnaryExpression' && pn.operator === '!' && e.parentPath.parentPath?.node.type === 'UnaryExpression') {
+      e = e.parentPath.parentPath; // `!!session`
+    } else if (pn?.type === 'CallExpression' && calleeName(pn.callee) === 'Boolean') {
+      e = e.parentPath;
+    } else if (
+      pn?.type === 'BinaryExpression' &&
+      (pn.operator === '!=' || pn.operator === '!==') &&
+      (pn.right?.type === 'NullLiteral' || (pn.right?.type === 'Identifier' && pn.right.name === 'undefined'))
+    ) {
+      e = e.parentPath;
+    }
+    const guard = e.parentPath?.node;
+    return guard?.type === 'IfStatement' && guard.test === e.node && exits(guard.consequent);
+  });
+}
+
+/**
+ * Wrapper names that apply auth, beyond the fixed list: `withApiAuthRequired`,
+ * `protectedRoute`, `adminAction`. Applied only to a function's wrapper, never to a
+ * plain call, and only to decide the wrapped function inherits a check.
+ */
+const AUTH_WRAPPER_NAME = /auth|protect|guard|session|require|admin|secure|signed|permission|role|apikey|api_key|token/i;
+
+function isAuthWrapper(wrapper: string, credited: ReadonlySet<string>): boolean {
+  if (!wrapper) return false;
+  const root = wrapper.split('.')[0]!;
+  const tail = wrapper.slice(wrapper.lastIndexOf('.') + 1);
+  return (
+    matchesAny(wrapper, AUTH_WRAPPERS) ||
+    AUTH_WRAPPERS.includes(root) ||
+    credited.has(wrapper) ||
+    credited.has(root) ||
+    AUTH_WRAPPER_NAME.test(root) ||
+    AUTH_WRAPPER_NAME.test(tail)
+  );
+}
+
+/** True when any node in `node` satisfies `pred`, skipping property names and object keys. */
+function mentions(node: any, pred: (id: string) => boolean, depth = 0): boolean {
+  if (!node || typeof node !== 'object' || depth > 60) return false;
+  if (Array.isArray(node)) return node.some((c) => mentions(c, pred, depth + 1));
+  if (node.type === 'Identifier') return pred(node.name);
+  if ((node.type === 'MemberExpression' || node.type === 'OptionalMemberExpression') && !node.computed) {
+    return mentions(node.object, pred, depth + 1);
+  }
+  if (node.type === 'ObjectProperty' && !node.computed) return mentions(node.value, pred, depth + 1);
+  for (const key of Object.keys(node)) {
+    if (key === 'loc' || key === 'leadingComments' || key === 'trailingComments' || key === 'extra') continue;
+    const v = node[key];
+    if (v && typeof v === 'object' && mentions(v, pred, depth + 1)) return true;
+  }
+  return false;
+}
+
+/** What a function is analysed with: the file's auth vocabulary and module-level facts. */
+interface FileFacts {
+  /** Names that stand for an auth check in this file — see ./auth-helpers.ts. */
+  credited: ReadonlySet<string>;
+  /** First-party helpers whose only check is Supabase `getSession()`. */
+  sessionOnly: ReadonlySet<string>;
+  /** Module-level `const KEY = process.env.SOME_SECRET` names, read by identifier. */
+  secretConsts: ReadonlySet<string>;
+  /** Module-level names bound to a `Set`, `Map`, hash and the like. */
+  inProcess: ReadonlySet<string>;
+}
+
 interface ActionInfo {
   name: string;
   line: number;
@@ -430,11 +730,11 @@ interface ActionInfo {
 function analyseFunction(
   path: any,
   name: string,
-  /** Names that stand for an auth check in this file — see ./auth-helpers.ts. */
-  credited: ReadonlySet<string>,
-  /** Module-level `const KEY = process.env.SOME_SECRET` names, read by identifier. */
-  secretConsts: ReadonlySet<string>,
+  facts: FileFacts,
+  /** Calls this function is handed to from outside its own path: `export default withAuth(handler)`. */
+  outerWrappers: string[] = [],
 ): ActionInfo {
+  const { credited, sessionOnly, secretConsts } = facts;
   const node = path.node;
   const info: ActionInfo = {
     name,
@@ -467,6 +767,10 @@ function analyseFunction(
   // An id the caller passed in is not proof of ownership — it is the IDOR.
   // Only a principal resolved inside the function counts as scoping.
   const params = parameterNames(node.params ?? []);
+  // Except `ctx`: in a wrapped action (`authActionClient.action(async ({ parsedInput, ctx })`)
+  // or a tRPC procedure it is what the auth middleware resolved, not what the caller sent —
+  // `ctx.userId` is the session's id.
+  params.delete('ctx');
 
   /**
    * Names holding the caller's payload as one object: a Server Action's own
@@ -477,7 +781,8 @@ function analyseFunction(
   const payloads = new Set<string>();
   for (const p of node.params ?? []) {
     // Only whole-object parameters. `({ name, role })` is already field by field.
-    if (p?.type === 'Identifier' && !/^(req|request|_req|_request|nextRequest)$/i.test(p.name)) {
+    // Not `ctx` either: the auth middleware's context, see `params` above.
+    if (p?.type === 'Identifier' && !/^(req|request|_req|_request|nextRequest|ctx)$/i.test(p.name)) {
       payloads.add(p.name);
     }
   }
@@ -524,6 +829,101 @@ function analyseFunction(
   // caller-supplied input just as much as a body is.
   if (params.has('params')) info.readsRequestInput = true;
 
+  // A handler that turns a caller away with 401/403 on the strength of what a credential
+  // check returned — `const authInfo = getAuthInfoFromCookie(request); if (!authInfo) return
+  // 401`, or a bearer key looked up in a table — authenticates, whatever the helper is called.
+  // Two things do not count. A value that never touched a credential (`getUserId()` that mints
+  // an id when none exists). And a claim: `x-actor-role: owner` compared to a literal, or an
+  // approval flag read from a row the body's own id selected, is the caller describing
+  // themselves or their request, not proving who they are — both were real bugs in the sample.
+  const credentialDerived = new Set<string>();
+  const touchesCredential = (n0: any) =>
+    someNode(n0, (n) => (n.type === 'Identifier' && credentialDerived.has(n.name)) || isCredentialSource(n));
+
+  /**
+   * Names holding something the caller chose: a non-request parameter (`formData`, `id`,
+   * `input`), a request body or query read, or a value computed from one. An id read from
+   * one of these is the caller naming a row, not the session naming its owner — so it is
+   * never owner scoping (CTS004), and `getUser(id)` on it is a lookup, not auth.
+   */
+  const callerParams = new Set([...params].filter((p) => !REQUEST_PARAM.test(p) && p !== 'res' && p !== 'response'));
+  const callerDerived = new Set<string>();
+  const isCallerName = (id: string) => callerParams.has(id) || payloads.has(id) || callerDerived.has(id);
+  const readsCaller = (n0: any): boolean =>
+    mentions(n0, isCallerName) ||
+    someNode(n0, (n) => {
+      if (n.type === 'CallExpression' || n.type === 'OptionalCallExpression') return REQUEST_INPUT_READ.test(calleeName(n.callee));
+      if (n.type === 'MemberExpression' || n.type === 'OptionalMemberExpression') {
+        return /(^|\.)(req|request|_req|_request|nextRequest)\??\.(body|query|nextUrl|url)$/.test(calleeName(n)) || /(^|\.)searchParams$/.test(calleeName(n));
+      }
+      return false;
+    });
+  const provesIdentityIn = (n0: any) =>
+    someNode(n0, (n) => {
+      if (n.type !== 'CallExpression' && n.type !== 'OptionalCallExpression') return false;
+      const f = calleeName(n.callee);
+      return (matchesAny(f, AUTH_CALLS) && !isUserLookup(n)) || credited.has(f);
+    });
+  // Two passes so a value derived from one declared later in a loop body still resolves.
+  for (let pass = 0; pass < 2; pass++) {
+    path.traverse({
+      VariableDeclarator(inner: any) {
+        const init = inner.node.init;
+        if (!init) return;
+        if (touchesCredential(init)) {
+          for (const n of parameterNames([inner.node.id])) credentialDerived.add(n);
+          return;
+        }
+        if (provesIdentityIn(init)) return;
+        // Only the input itself, read or converted: `String(formData.get('userId'))`,
+        // `body.userId`. A row looked up BY a caller's id is not the caller's input —
+        // `report.userId !== user.id` after `findUnique({ where: { id } })` is the
+        // ownership check, and reading it as caller-supplied was a false positive on it.
+        const looksSomethingUp = someNode(init, (n) => {
+          if (n.type !== 'CallExpression' && n.type !== 'OptionalCallExpression') return false;
+          return !isInertCall(calleeName(n.callee), calleeTail(n.callee));
+        });
+        if (looksSomethingUp) return;
+        if (readsCaller(init)) for (const n of parameterNames([inner.node.id])) callerDerived.add(n);
+      },
+    });
+  }
+  const localInProcess = inProcessNames(node.body);
+  for (const n of facts.inProcess) localInProcess.add(n);
+
+  /**
+   * Every auth check found, as the path it sits at. Credited only after the walk, once
+   * the writes are known too: a check counts if it runs before each write it guards.
+   */
+  const authEvents: any[] = [];
+  /** Every write, as the path of the call that makes it. */
+  const mutationPaths: any[] = [];
+
+  /** `admin.auth().deleteUser(uid)`: the method a call's result is immediately used for. */
+  const methodCalledOnResult = (p: any): string | null => {
+    let cur = p;
+    while (cur.parentPath && /^(AwaitExpression|TSNonNullExpression|ParenthesizedExpression)$/.test(cur.parentPath.node.type)) {
+      cur = cur.parentPath;
+    }
+    const member = cur.parentPath;
+    const mt = member?.node?.type;
+    if ((mt !== 'MemberExpression' && mt !== 'OptionalMemberExpression') || member.node.object !== cur.node) return null;
+    const call = member.parentPath?.node;
+    if ((call?.type !== 'CallExpression' && call?.type !== 'OptionalCallExpression') || call.callee !== member.node) {
+      // `(await clerkClient()).users.getUser(id)`: a property of the result, then a call on it.
+      let up = member;
+      while (up.parentPath && (up.parentPath.node.type === 'MemberExpression' || up.parentPath.node.type === 'OptionalMemberExpression') && up.parentPath.node.object === up.node) {
+        up = up.parentPath;
+      }
+      const c = up.parentPath?.node;
+      if (up !== member && (c?.type === 'CallExpression' || c?.type === 'OptionalCallExpression') && c.callee === up.node) {
+        return calleeTail(up.node);
+      }
+      return null;
+    }
+    return member.node.property?.name ?? '*';
+  };
+
   const inspect = (inner: any) => {
     const full = calleeName(inner.node.callee);
     const tail = calleeTail(inner.node.callee);
@@ -539,27 +939,40 @@ function analyseFunction(
       AUTH_VERB_HELPER.test(tail) &&
       (inner.node.arguments ?? []).some((arg: any) => isRequestish(arg))
     ) {
-      info.hasAuth = true;
+      authEvents.push(inner);
     }
 
     // `supabase.auth.getSession()` reads the cookie without asking the auth
     // server whether the token is still valid, so it proves nothing on the
     // server. It must not satisfy the auth check via the generic `getSession`
-    // entry, which exists for hand-rolled helpers.
-    const isSupabaseGetSession = /(^|\.)auth\.getSession$/.test(full);
+    // entry, which exists for hand-rolled helpers — nor through a first-party
+    // helper, whatever it is named, whose only check is that call.
+    const isSupabaseGetSession = SUPABASE_GET_SESSION.test(full) || sessionOnly.has(full);
+    // `admin.auth().deleteUser(uid)`, `(await clerkClient()).users.getUser(id)`: the auth-named
+    // call only hands back an admin client. The call made on it is judged on its own.
+    const accessorOnly = isAccessorOnly(methodCalledOnResult(inner));
+    // `clerkClient.users.getUser(id)`, `admin.auth().getUser(uid)`, or `getUser(id)` on an id
+    // the caller supplied: looking a user up is not checking who is calling.
+    const firstArg = inner.node.arguments?.[0];
+    const lookup =
+      tail === 'getUser' &&
+      (isUserLookup(inner.node) ||
+        (firstArg !== undefined && !isRequestish(firstArg) && !touchesCredential(firstArg) && readsCaller(firstArg)));
     if (isSupabaseGetSession) {
       info.getSessionLine ??= inner.node.loc?.start.line ?? info.line;
+    } else if (accessorOnly || lookup) {
+      // not an auth check
     } else if (matchesAny(full, AUTH_CALLS)) {
-      info.hasAuth = true;
+      authEvents.push(inner);
     } else if (credited.has(full)) {
       // The check lives in a first-party helper this file imports, or one
       // defined above in the same file. Matched on the whole callee name, not
       // its tail: a helper is called by the name this file binds it to, and
       // crediting `crypto.verify()` because some other module exports a
       // `verify` helper would hide a real finding.
-      info.hasAuth = true;
+      authEvents.push(inner);
     }
-    if (matchesAny(full, AUTH_WRAPPERS)) info.hasAuth = true;
+    if (matchesAny(full, AUTH_WRAPPERS) && !accessorOnly) authEvents.push(inner);
     if (matchesAny(full, SIGNATURE_CHECKS) || SIGNATURE_VERIFY_NAME.test(tail)) info.hasSignatureCheck = true;
     if (STRONG_SIGNATURE_NAME.test(tail) || /(^|\.)(webhooks\.)?constructEvent(Async)?$/.test(full)) {
       info.verifiesSignature = true;
@@ -569,9 +982,11 @@ function analyseFunction(
       MUTATION_CALLS.has(tail) &&
       !NOT_A_DATA_WRITE.test(full) &&
       !NOT_A_DATA_RECEIVER.test(full) &&
+      !isInProcessMutation(inner.node, localInProcess) &&
       !isAiCall
     ) {
       info.hasMutation = true;
+      mutationPaths.push(inner);
       if (info.mutationLine === null) {
         info.mutationLine = inner.node.loc?.start.line ?? info.line;
       }
@@ -629,6 +1044,7 @@ function analyseFunction(
               : '';
         if (/\b(insert\s+into|update\s+|delete\s+from|drop\s+|alter\s+)/i.test(text)) {
           info.hasMutation = true;
+          mutationPaths.push(inner);
           if (info.mutationLine === null) {
             info.mutationLine = inner.node.loc?.start.line ?? info.line;
           }
@@ -646,6 +1062,7 @@ function analyseFunction(
       const text = inner.node.quasi.quasis.map((q: any) => q.value.raw).join(' ');
       if (/\b(insert\s+into|update\s+|delete\s+from)/i.test(text)) {
         info.hasMutation = true;
+        mutationPaths.push(inner);
         if (info.mutationLine === null) {
           info.mutationLine = inner.node.loc?.start.line ?? info.line;
         }
@@ -672,18 +1089,36 @@ function analyseFunction(
           info.serviceRoleLine ??= inner.node.loc?.start.line ?? info.line;
         }
       }
+      // `body.userId` after `const body = await req.json()` is the caller naming an id;
+      // only a principal the function resolved itself scopes the write.
       const root = rootObject(inner.node);
-      if (!root || !params.has(root)) {
+      if (!root || (!params.has(root) && !isCallerName(root))) {
         for (const hint of OWNER_HINTS) {
           if (full === hint || full.endsWith('.' + hint)) info.ownerScoped = true;
         }
       }
     },
+    ObjectProperty(inner: any) {
+      // `where: { ownerId: me.id }` — a key naming the owner column, given a value that is
+      // not the caller's own input. `{ userId: body.userId }` is not scoping.
+      const prop = inner.node;
+      if (prop.computed || prop.shorthand || !OWNER_IDENTIFIERS.has(propertyKey(prop))) return;
+      if (prop.value?.type === 'StringLiteral' || prop.value?.type === 'NumericLiteral') return;
+      if (mentions(prop.value, (id) => params.has(id) || isCallerName(id)) || readsCaller(prop.value)) return;
+      info.ownerScoped = true;
+    },
     Identifier(inner: any) {
       if (SERVICE_ROLE_HINTS.includes(inner.node.name)) {
         info.serviceRoleLine ??= inner.node.loc?.start.line ?? info.line;
       }
-      if (OWNER_IDENTIFIERS.has(inner.node.name) && !params.has(inner.node.name)) {
+      // Only a reference to a binding counts — not `body.userId`'s property name, nor an
+      // object key (handled above) — and not one holding what the caller sent.
+      if (
+        OWNER_IDENTIFIERS.has(inner.node.name) &&
+        !params.has(inner.node.name) &&
+        !isCallerName(inner.node.name) &&
+        inner.isReferencedIdentifier()
+      ) {
         info.ownerScoped = true;
       }
       // `const { searchParams } = new URL(request.url)` — destructured, so it
@@ -701,34 +1136,56 @@ function analyseFunction(
   // an id when none exists). And a claim: `x-actor-role: owner` compared to a literal, or an
   // approval flag read from a row the body's own id selected, is the caller describing
   // themselves or their request, not proving who they are — both were real bugs in the sample.
-  const credentialDerived = new Set<string>();
-  const touchesCredential = (node: any) =>
-    someNode(node, (n) => (n.type === 'Identifier' && credentialDerived.has(n.name)) || isCredentialSource(n));
+  // (credentialDerived is worked out above, before the call walk.) A 401/403 guard on it
+  // is an auth check like any other, and is placed like one: a guard after the write
+  // turns the caller away once the row is already changed.
+  const guardEvents: any[] = [];
   path.traverse({
-    VariableDeclarator(inner: any) {
-      if (!inner.node.init || !touchesCredential(inner.node.init)) return;
-      for (const n of parameterNames([inner.node.id])) credentialDerived.add(n);
-    },
     IfStatement(inner: any) {
-      if (info.hasAuth || !touchesCredential(inner.node.test)) return;
-      // A guard after the write turns the caller away once the row is already changed.
-      const guardLine = inner.node.loc?.start.line ?? 0;
-      if (info.mutationLine !== null && guardLine > info.mutationLine) return;
-      if (someNode(inner.node.consequent, isUnauthorisedExit)) info.hasAuth = true;
+      if (!touchesCredential(inner.node.test)) return;
+      if (someNode(inner.node.consequent, isUnauthorisedExit)) guardEvents.push(inner);
     },
   });
 
+  /**
+   * Whether a check at `ev` protects the write at `m`: it runs, in production, before it.
+   * Compared inside the innermost function holding both, so a check and a write in the
+   * same `$transaction` callback are ordered by where they sit in it.
+   */
+  const guards = (ev: any, m: any | null): boolean => {
+    if (m === null) return runPosition(ev, path) !== NEVER_RUNS;
+    const scope = commonFunction(ev, m, path);
+    const at = runPosition(ev, scope);
+    return at !== NEVER_RUNS && at <= runPosition(m, scope);
+  };
+  const valid = (ev: any, isCall: boolean) =>
+    !skippedInProduction(ev, path) && !(isCall && onlyInvertedGuard(ev));
+  const events = [
+    ...authEvents.filter((ev) => valid(ev, true)),
+    ...guardEvents.filter((ev) => valid(ev, false)),
+  ];
+  info.hasAuth =
+    events.length > 0 &&
+    (mutationPaths.length === 0
+      ? events.some((ev) => guards(ev, null))
+      : mutationPaths.every((m) => events.some((ev) => guards(ev, m))));
+
   // An action wrapped by an auth HOC inherits the check from its wrapper.
+  const wrappedBy = (wrapper: string, tail: string) => {
+    if (isAuthWrapper(wrapper, credited)) info.hasAuth = true;
+    // `verifySignatureAppRouter(async (req) => ...)` (Upstash QStash) and the like.
+    if (STRONG_SIGNATURE_NAME.test(wrapper)) info.verifiesSignature = true;
+    if (VALIDATION_CALLS.has(tail)) info.hasValidation = true;
+  };
   let parent = path.parentPath;
   let hops = 0;
   while (parent && hops++ < 4) {
     if (parent.node?.type === 'CallExpression') {
-      const wrapper = calleeName(parent.node.callee);
-      if (matchesAny(wrapper, AUTH_WRAPPERS) || credited.has(wrapper)) info.hasAuth = true;
-      if (VALIDATION_CALLS.has(calleeTail(parent.node.callee))) info.hasValidation = true;
+      wrappedBy(calleeName(parent.node.callee), calleeTail(parent.node.callee));
     }
     parent = parent.parentPath;
   }
+  for (const w of outerWrappers) wrappedBy(w, w.slice(w.lastIndexOf('.') + 1));
 
   return info;
 }
@@ -756,8 +1213,30 @@ function propertyKey(prop: any): string {
 
 const HTTP_MUTATION_METHODS = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
 
+/** An App Router route handler — including the root one, `app/route.ts`. */
 function isRouteHandlerFile(relPath: string): boolean {
-  return /(^|\/)(app|src\/app)\/.*\/route\.(t|j)sx?$/.test(relPath);
+  return /(^|\/)(src\/)?app\/(.*\/)?route\.(t|j)sx?$/.test(relPath);
+}
+
+/** A Pages Router API route: its default export answers every method. */
+function isPagesApiFile(relPath: string): boolean {
+  return /(^|\/)(src\/)?pages\/api\/.+\.(t|j)sx?$/.test(relPath) && !/\.d\.ts$|\.(test|spec)\.[tj]sx?$/.test(relPath);
+}
+
+/**
+ * The method label for a Pages Router handler. It answers GET as well as POST, so it is
+ * judged on a write it actually makes, never on its method alone (not in HTTP_MUTATION_METHODS).
+ */
+const ANY_METHOD = 'ANY';
+
+const ROUTE_METHOD = /^(GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS)$/;
+
+function unwrapExpression(p: any): any {
+  let cur = p;
+  while (cur?.node && /^(TSAsExpression|TSSatisfiesExpression|TSNonNullExpression|ParenthesizedExpression)$/.test(cur.node.type)) {
+    cur = cur.get('expression');
+  }
+  return cur;
 }
 
 export const serverActionsScanner: Scanner = {
@@ -777,7 +1256,7 @@ export const serverActionsScanner: Scanner = {
       authCalls: AUTH_CALLS,
       authWrappers: AUTH_WRAPPERS,
       index: buildModuleIndex(ctx.files, ctx.root),
-      cache: new Map<string, ReadonlySet<string>>(),
+      cache: new Map<string, ModuleAuth>(),
     };
 
     const effectOptions = {
@@ -793,18 +1272,50 @@ export const serverActionsScanner: Scanner = {
 
       const relPath = rel(ctx.root, file);
       const routeFile = isRouteHandlerFile(relPath);
-      const moduleUseServer = /^\s*(['"])use server\1/m.test(source.slice(0, 400));
-      if (!moduleUseServer && !routeFile && !source.includes('use server')) continue;
+      const pagesApi = !routeFile && isPagesApiFile(relPath);
+      if (!routeFile && !pagesApi && !source.includes('use server')) continue;
 
-      const ast = parseSource(source, file);
-      if (!ast) {
-        result.warnings.push(`could not parse ${relPath}`);
-        continue;
+      // One file that cannot be read — a parse failure, or a stack overflow on a
+      // pathologically deep expression — is that file NOT checked. It must neither
+      // end the scan for every other file nor pass as clear.
+      try {
+        const ast = parseSource(source, file);
+        if (!ast) {
+          result.incomplete!.push(
+            `could not parse ${relPath}, so its Server Actions / Route Handlers were NOT checked for authorization`,
+          );
+          continue;
+        }
+        analyseFile(file, relPath, source, ast, routeFile, pagesApi);
+      } catch (err) {
+        result.incomplete!.push(
+          `could not analyse ${relPath} (${err instanceof Error ? err.message : String(err)}), so its ` +
+            'Server Actions / Route Handlers were NOT checked for authorization',
+        );
       }
+    }
+
+    function analyseFile(file: string, relPath: string, source: string, ast: any, routeFile: boolean, pagesApi: boolean) {
       const suppress = new Suppressions(source);
-      const programUseServer = moduleUseServer || hasDirective(ast.program, 'use server');
-      const credited = authNamesFor(file, helperOptions, ast);
-      const secretConsts = moduleSecretConsts(ast);
+      // The program's own directive prologue. A regex over the first lines used to read
+      // an indented inline `'use server'` as the module's, turning every export into an action.
+      const programUseServer = hasDirective(ast.program, 'use server');
+      const helpers = authHelpersFor(file, helperOptions, ast);
+      const facts: FileFacts = {
+        credited: helpers.credited,
+        sessionOnly: helpers.sessionOnly,
+        secretConsts: moduleSecretConsts(ast),
+        inProcess: new Set(
+          (ast.program.body as any[])
+            .flatMap((st) => (st.type === 'ExportNamedDeclaration' ? [st.declaration] : [st]))
+            .filter((d) => d?.type === 'VariableDeclaration')
+            .flatMap((d) => d.declarations)
+            .filter((d: any) => d?.id?.type === 'Identifier' && isInProcessValue(d.init))
+            .map((d: any) => d.id.name),
+        ),
+      };
+      /** Function nodes already reported, so one reached two ways is analysed once. */
+      const analysed = new Set<any>();
 
       const push = (f: Omit<Finding, 'file'> & { line: number }) => {
         if (suppress.suppressed(f.line, f.id)) return;
@@ -815,20 +1326,27 @@ export const serverActionsScanner: Scanner = {
         });
       };
 
-      const handle = (path: any, name: string, exported: boolean, httpMethod?: string) => {
-        const node = path.node;
+      const handle = (path: any, name: string, exported: boolean, httpMethod?: string, wrappers: string[] = []) => {
+        const node = path?.node;
+        if (!node || analysed.has(node)) return;
         const inlineUseServer = hasDirective(node, 'use server');
-        const isAction = exported && (programUseServer || inlineUseServer);
+        // An inline `'use server'` makes the function an action whether or not it is
+        // exported: `<form action={deletePost}>` posts to it by id all the same.
+        const isAction = (exported && programUseServer) || inlineUseServer;
         const isRoute = Boolean(httpMethod);
         if (!isAction && !isRoute) return;
+        analysed.add(node);
 
-        const info = analyseFunction(path, name, credited, secretConsts);
+        const info = analyseFunction(path, name, facts, wrappers);
         if (isAction) actionCount++;
         if (isRoute) routeCount++;
 
         const kind = isRoute ? 'Route Handler' : 'Server Action';
+        const routePath = pagesApi
+          ? relPath.replace(/^(.*\/)?(src\/)?pages/, '').replace(/\.[tj]sx?$/, '').replace(/\/index$/, '')
+          : relPath.replace(/^(src\/)?app/, '').replace(/\/route\.[tj]sx?$/, '');
         const exposure = isRoute
-          ? `\`${httpMethod} ${relPath.replace(/^(src\/)?app/, '').replace(/\/route\.[tj]sx?$/, '') || '/'}\` is a public HTTP endpoint.`
+          ? `\`${httpMethod === ANY_METHOD ? '*' : httpMethod} ${routePath || '/'}\` is a public HTTP endpoint.`
           : 'Server Actions compile to public HTTP POST endpoints — anyone can invoke this by ID, the UI is not a gate.';
 
         // `PUT`/`POST` are assumed to write, but a handler that reads nothing from the
@@ -850,7 +1368,9 @@ export const serverActionsScanner: Scanner = {
         }
         const writes = info.hasMutation || (methodOnly && !effectFree);
         const isWebhook =
-          isRoute && httpMethod === 'POST' && /webhook|\bhooks?\b|stripe|clerk|svix/i.test(relPath);
+          isRoute &&
+          (httpMethod === 'POST' || httpMethod === ANY_METHOD) &&
+          /webhook|\bhooks?\b|stripe|clerk|svix/i.test(relPath);
         const isCron = isRoute && /(^|\/)(cron|scheduled|jobs?)(\/|$)/i.test(relPath);
 
         // Some endpoints are unauthenticated by design — the sign-in and
@@ -1075,7 +1595,7 @@ export const serverActionsScanner: Scanner = {
 
       // Validation that opts out of validating. Reported per file, since the
       // schema is usually declared at module scope, away from the action.
-      if (programUseServer || routeFile) {
+      if (programUseServer || routeFile || pagesApi) {
         LOOSE_SCHEMA.lastIndex = 0;
         const loose = LOOSE_SCHEMA.exec(source);
         if (loose) {
@@ -1098,30 +1618,118 @@ export const serverActionsScanner: Scanner = {
         }
       }
 
+      const methodFor = (exportedName: string) =>
+        routeFile && ROUTE_METHOD.test(exportedName) ? exportedName : undefined;
+
+      /**
+       * The function an expression stands for, and the calls wrapping it: a function
+       * itself; `cache(async () => ...)` or `withAuth(handler)` — any call handed a function
+       * or a local function's name, however deeply nested; or the name of a local
+       * function. Wrappers are recorded so an auth wrapper still credits what it wraps,
+       * and anything else is looked through, so `cache()` no longer hides the action.
+       */
+      const resolveFn = (
+        p: any,
+        locals: Map<string, { fn: any; wrappers: string[] }>,
+        depth = 0,
+      ): { fn: any; wrappers: string[] } | null => {
+        const cur = unwrapExpression(p);
+        const n = cur?.node;
+        if (!n || depth > 4) return null;
+        if (n.type === 'ArrowFunctionExpression' || n.type === 'FunctionExpression' || n.type === 'FunctionDeclaration') {
+          return { fn: cur, wrappers: [] };
+        }
+        if (n.type === 'Identifier') {
+          const local = locals.get(n.name);
+          return local ?? null;
+        }
+        if (n.type === 'CallExpression' || n.type === 'OptionalCallExpression') {
+          const wrapper = calleeName(n.callee);
+          const args = cur.get('arguments') as any[];
+          for (const arg of args) {
+            const inner = resolveFn(arg, locals, depth + 1);
+            if (!inner) continue;
+            // A function argument sits inside the call, where analyseFunction's own
+            // parent walk sees the wrapper; a name does not, so it is carried along.
+            const direct = inner.fn.node === unwrapExpression(arg)?.node || inner.fn.findParent?.((q: any) => q.node === n);
+            return { fn: inner.fn, wrappers: direct ? inner.wrappers : [wrapper, ...inner.wrappers] };
+          }
+        }
+        return null;
+      };
+
       traverse(ast, {
-        ExportNamedDeclaration(path: any) {
-          const decl = path.node.declaration;
-          if (!decl) return;
-          if (decl.type === 'FunctionDeclaration' && decl.id) {
-            const name = decl.id.name;
-            const method = routeFile && /^(GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS)$/.test(name) ? name : undefined;
-            handle(path.get('declaration'), name, true, method);
-          } else if (decl.type === 'VariableDeclaration') {
-            decl.declarations.forEach((d: any, i: number) => {
-              if (d.id?.type !== 'Identifier') return;
-              if (d.init?.type !== 'ArrowFunctionExpression' && d.init?.type !== 'FunctionExpression') return;
-              const name = d.id.name;
-              const method = routeFile && /^(GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS)$/.test(name) ? name : undefined;
-              const initPath = path.get(`declaration.declarations.${i}.init`);
-              handle(initPath, name, true, method);
-            });
+        Program(program: any) {
+          // Top-level functions by name, for `export { x }`, `export default x` and
+          // `withAuth(x)`. Declarations first, then values built from them.
+          const locals = new Map<string, { fn: any; wrappers: string[] }>();
+          const statements = (program.get('body') as any[]).map((st) =>
+            st.node.type === 'ExportNamedDeclaration' || st.node.type === 'ExportDefaultDeclaration'
+              ? st.get('declaration')
+              : st,
+          );
+          for (const st of statements) {
+            if (st?.node?.type === 'FunctionDeclaration' && st.node.id) locals.set(st.node.id.name, { fn: st, wrappers: [] });
+          }
+          for (let round = 0; round < 2; round++) {
+            for (const st of statements) {
+              if (st?.node?.type !== 'VariableDeclaration') continue;
+              (st.get('declarations') as any[]).forEach((d: any) => {
+                if (d.node.id?.type !== 'Identifier' || !d.node.init || locals.has(d.node.id.name)) return;
+                const r = resolveFn(d.get('init'), locals);
+                if (r) locals.set(d.node.id.name, r);
+              });
+            }
+          }
+
+          for (const st of program.get('body') as any[]) {
+            const n = st.node;
+            if (n.type === 'ExportNamedDeclaration') {
+              const decl = n.declaration;
+              if (decl?.type === 'FunctionDeclaration' && decl.id) {
+                handle(st.get('declaration'), decl.id.name, true, methodFor(decl.id.name));
+              } else if (decl?.type === 'VariableDeclaration') {
+                (st.get('declaration.declarations') as any[]).forEach((d: any) => {
+                  if (d.node.id?.type !== 'Identifier' || !d.node.init) return;
+                  const name = d.node.id.name;
+                  const r = resolveFn(d.get('init'), locals);
+                  if (r) handle(r.fn, name, true, methodFor(name), r.wrappers);
+                });
+              } else if (!decl && !n.source) {
+                // `export { deletePost }`, `export { handler as POST, handler as DELETE }`.
+                for (const s of n.specifiers ?? []) {
+                  if (s.type !== 'ExportSpecifier') continue;
+                  const exportedName = s.exported?.name ?? s.exported?.value;
+                  const local = locals.get(s.local?.name);
+                  if (!local || !exportedName) continue;
+                  // One function exported as two methods is one handler, reported once.
+                  handle(local.fn, exportedName, true, methodFor(exportedName), local.wrappers);
+                }
+              }
+            } else if (n.type === 'ExportDefaultDeclaration') {
+              const method = pagesApi ? ANY_METHOD : undefined;
+              const r = resolveFn(st.get('declaration'), locals);
+              if (!r) continue;
+              const decl = n.declaration;
+              const name =
+                decl?.id?.name ?? (decl?.type === 'Identifier' ? decl.name : r.fn.node.id?.name) ?? 'default';
+              handle(r.fn, name, true, method, r.wrappers);
+            }
           }
         },
-        ExportDefaultDeclaration(path: any) {
-          const decl = path.node.declaration;
-          if (decl?.type === 'FunctionDeclaration' || decl?.type === 'ArrowFunctionExpression') {
-            handle(path.get('declaration'), decl.id?.name ?? 'default', true);
-          }
+        // Inline actions: any function whose own body opens with `'use server'`, exported
+        // or not — typically declared inside a Server Component and passed to a form.
+        Function(path: any) {
+          if (!hasDirective(path.node, 'use server')) return;
+          const n = path.node;
+          const pn = path.parentPath?.node;
+          const name =
+            n.id?.name ??
+            (pn?.type === 'VariableDeclarator' && pn.id?.type === 'Identifier' ? pn.id.name : null) ??
+            (pn?.type === 'ObjectProperty' ? propertyKey(pn) || null : null) ??
+            (n.type === 'ObjectMethod' || n.type === 'ClassMethod' ? propertyKey(n) || null : null) ??
+            'inline action';
+          handle(path, name, false);
         },
       });
     }
