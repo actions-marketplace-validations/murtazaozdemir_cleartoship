@@ -1,6 +1,6 @@
 {
   "name": "cleartoship",
-  "version": "0.13.12",
+  "version": "0.13.13",
   "private": true,
   "description": "The 30-second pre-launch security clearance for AI-built apps. Statically checks the agent surface no runtime scanner sees before deploy — ungated tools, model output in a shell, prompts in the client bundle — plus missing Server Action auth, Supabase RLS holes, hallucinated npm packages and leaked keys. Free while in beta.",
   "keywords": [

@@ -368,7 +368,7 @@ attestation checked before it runs (every release after 0.13.10 carries one):
 
 ```yaml
       - run: |
-          curl -fsSL https://github.com/murtazaozdemir/cleartoship/releases/download/v0.13.12/cleartoship.mjs -o cleartoship.mjs
+          curl -fsSL https://github.com/murtazaozdemir/cleartoship/releases/download/v0.13.13/cleartoship.mjs -o cleartoship.mjs
           gh attestation verify cleartoship.mjs --repo murtazaozdemir/cleartoship
         env: { GH_TOKEN: "${{ github.token }}" }
       - run: node cleartoship.mjs --fail-on=critical
@@ -406,7 +406,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - uses: murtazaozdemir/cleartoship@v0.13.12
+      - uses: murtazaozdemir/cleartoship@v0.13.13
         with:
           fail-on: critical
           comment: true
@@ -440,7 +440,7 @@ if the scan was incomplete and `allow-incomplete` is not set. `fail-on: none`
 turns both off.
 
 By default the action runs the release bundle for the version its own ref
-declares, so `@v0.13.12` runs ClearToShip 0.13.12 and pinning the ref pins the
+declares, so `@v0.13.13` runs ClearToShip 0.13.13 and pinning the ref pins the
 behaviour. Before running a downloaded bundle it verifies the bundle's GitHub
 build-provenance attestation (`gh attestation verify`: built by this
 repository's release workflow, from that version's tag) and that it reports
