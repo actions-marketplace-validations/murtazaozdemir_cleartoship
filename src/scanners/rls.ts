@@ -8,7 +8,7 @@ import {
 import { readBalanced } from '../utils/sql.js';
 import type { Finding, ProjectContext, ScanResult, Scanner, Severity } from '../internal.js';
 import { existsSync } from 'node:fs';
-import { dirname, join, relative, resolve, isAbsolute } from 'node:path';
+import { basename, dirname, join, relative, resolve, isAbsolute } from 'node:path';
 
 /* ------------------------------------------------------------------------- *
  * Which .sql files are PostgreSQL at all.
@@ -73,6 +73,8 @@ interface DialectModel {
   d1ConfigDirs: Set<string>;
   /** Absolute D1 `migrations_dir` paths, resolved against their config. */
   d1MigrationDirs: Set<string>;
+  /** Absolute Prisma migrations dirs whose `migration_lock.toml` names a non-Postgres provider. */
+  prismaOtherDirs: Set<string>;
   /** Directory → whether its nearest package.json depends on Supabase (null: none found). */
   pkgCache: Map<string, boolean | null>;
 }
@@ -86,7 +88,16 @@ function buildDialectModel(ctx: ProjectContext): DialectModel {
   // so configs are looked up on disk rather than taken from ctx.files.
   const dirs = new Set<string>();
   for (const f of ctx.files) for (const d of ancestors(dirname(f), ctx.root)) dirs.add(d);
+  const prismaOtherDirs = new Set<string>();
   for (const dir of dirs) {
+    // Prisma writes the datasource provider next to its migrations. Its
+    // SQLite output (`"id" TEXT NOT NULL PRIMARY KEY`, `DATETIME`) carries no
+    // SQLite-only syntax, so without this a Prisma-on-SQLite app read as a
+    // Supabase table with RLS off on every model.
+    const lockPath = join(dir, 'migration_lock.toml');
+    const lock = existsSync(lockPath) ? read(lockPath) : null;
+    const provider = lock === null ? undefined : /^\s*provider\s*=\s*"([^"]+)"/m.exec(lock)?.[1];
+    if (provider && !/^(postgres(ql)?|cockroachdb)$/i.test(provider)) prismaOtherDirs.add(dir);
     for (const name of WRANGLER_CONFIGS) {
       const path = join(dir, name);
       if (!existsSync(path)) continue;
@@ -97,7 +108,7 @@ function buildDialectModel(ctx: ProjectContext): DialectModel {
       for (const m of declared.length ? declared : ['migrations']) d1MigrationDirs.add(resolve(dir, m));
     }
   }
-  return { d1ConfigDirs, d1MigrationDirs, pkgCache: new Map() };
+  return { d1ConfigDirs, d1MigrationDirs, prismaOtherDirs, pkgCache: new Map() };
 }
 
 function nearestPackageSupabase(model: DialectModel, file: string, root: string): boolean | null {
@@ -132,7 +143,10 @@ const dialectCache = new WeakMap<ProjectContext, string[]>();
  *     config declares `d1_databases` while its nearest package.json does not
  *     depend on Supabase; or
  *   - it uses SQLite-only syntax (AUTOINCREMENT, unixepoch(), …) and no
- *     Postgres-only syntax.
+ *     Postgres-only syntax; or
+ *   - it sits under a Prisma migrations dir whose `migration_lock.toml` names
+ *     a provider other than PostgreSQL/CockroachDB, and has no Postgres-only
+ *     syntax.
  * Included — everything else, provided something says Postgres/Supabase: the
  * file is under `supabase/`, its nearest package.json depends on Supabase, or
  * the repo-wide signals (the root dependency set, a root `supabase/` dir, RLS
@@ -155,7 +169,8 @@ function postgresSqlFiles(ctx: ProjectContext): string[] {
       const inMigrationsDir = [...model.d1MigrationDirs].some((d) => isWithin(d, file));
       const underD1Worker = !pkgSupabase && [...model.d1ConfigDirs].some((d) => isWithin(d, file));
       const sqliteDialect = SQLITE_ONLY.test(src) && !POSTGRES_ONLY.test(src);
-      if (inMigrationsDir || underD1Worker || sqliteDialect) continue;
+      const prismaOther = [...model.prismaOtherDirs].some((d) => isWithin(d, file)) && !POSTGRES_ONLY.test(src);
+      if (inMigrationsDir || underD1Worker || sqliteDialect || prismaOther) continue;
     }
     candidates.push({ file, src, perFile: underSupabase || idioms || pkgSupabase });
   }
@@ -163,6 +178,56 @@ function postgresSqlFiles(ctx: ProjectContext): string[] {
   const out = candidates.filter((c) => repoSignal || c.perFile).map((c) => c.file);
   dialectCache.set(ctx, out);
   return out;
+}
+
+/* ------------------------------------------------------------------------- *
+ * Which .sql files belong to the same database.
+ *
+ * A whole-repo scan used to replay every .sql file into one schema, so two
+ * projects' migrations mixed: a monorepo's second app, or this repository's
+ * own test fixtures, had one project's policies judged against the other's
+ * tables (the clean fixture got the vulnerable one's CTS050, the vulnerable
+ * one lost a CTS014). Each file now belongs to the nearest directory, walking
+ * up from it towards the scan root, that is a project root:
+ *
+ *   - it has a `supabase/` directory holding `config.toml` or `migrations/`
+ *     (the Supabase CLI layout: migrations/, seed.sql and schemas/ all sit
+ *     under it, so every one of them resolves to the same parent); or
+ *   - it has a `package.json`; or
+ *   - it is the scan root.
+ *
+ * A directory named `supabase` is never a root itself, even with a
+ * package.json of its own (edge-function tooling often puts one there), so
+ * `supabase/migrations` always joins the app that owns the `supabase/` dir.
+ * A single-app repo — root package.json, SQL in supabase/, db/ or migrations/
+ * — is therefore one project; `packages/db/supabase/…` in a monorepo is its
+ * own.
+ * ------------------------------------------------------------------------- */
+
+function isProjectRoot(dir: string): boolean {
+  if (basename(dir) === 'supabase') return false;
+  if (existsSync(join(dir, 'package.json'))) return true;
+  const supa = join(dir, 'supabase');
+  return existsSync(join(supa, 'config.toml')) || existsSync(join(supa, 'migrations'));
+}
+
+/** Groups files by project root; each group keeps the input (sorted) order. */
+function partitionIntoProjects(files: string[], root: string): Map<string, string[]> {
+  const rootCache = new Map<string, boolean>();
+  const projects = new Map<string, string[]>();
+  for (const file of files) {
+    let owner = root;
+    for (const dir of ancestors(dirname(file), root)) {
+      if (dir === root || !isWithin(root, dir)) break;
+      let isRoot = rootCache.get(dir);
+      if (isRoot === undefined) { isRoot = isProjectRoot(dir); rootCache.set(dir, isRoot); }
+      if (isRoot) { owner = dir; break; }
+    }
+    const list = projects.get(owner) ?? [];
+    list.push(file);
+    projects.set(owner, list);
+  }
+  return projects;
 }
 
 const OWNER_COLUMNS = [
@@ -273,6 +338,130 @@ function serviceRoleOnly(p: Policy): boolean {
     predicates.every((e) => /^[\s(]*(?:select\s+)?auth\.role\(\)[\s)]*=\s*'service_role'[\s)]*$/i.test(e));
 }
 
+/* ------------------------------------------------------------------------- *
+ * Does a predicate isolate one user's rows from another's?
+ *
+ * Isolation means comparing the row to *who* the caller is: auth.uid(), a JWT
+ * claim, a request setting, current_user, or a helper function whose body does
+ * one of those. Checks that only establish *that* the caller is signed in —
+ * `auth.role() = 'authenticated'`, `auth.uid() IS NOT NULL`, the JWT's role /
+ * aud / aal / is_anonymous claims — are "gates": they let every signed-in user
+ * through. They are rewritten to marker tokens first, so `auth.uid() IS NOT
+ * NULL AND user_id = auth.uid()` still isolates and `auth.uid() IS NOT NULL`
+ * alone does not.
+ * ------------------------------------------------------------------------- */
+
+const CALLER_REF = /\bauth\s*\.\s*(?:uid|jwt|email)\s*\(\s*\)|\bcurrent_setting\s*\(|\bcurrent_user\b|\bsession_user\b/i;
+const GATE = '__cts_gate__';
+const NEUTRAL = '__cts_role__';
+
+/** `= 'authenticated'` and `<> 'anon'` admit every signed-in user; other role comparisons admit nobody in particular. */
+function roleComparison(op: string, role: string): string {
+  const eq = op === '=';
+  return (eq && role === 'authenticated') || (!eq && role === 'anon') ? GATE : NEUTRAL;
+}
+
+const ROLE_SOURCE =
+  String.raw`(?:\(\s*)?(?:select\s+)?(?:auth\s*\.\s*role\s*\(\s*\)` +
+  String.raw`|\(?\s*auth\s*\.\s*jwt\s*\(\s*\)\s*\)?\s*->>\s*'role'` +
+  String.raw`|current_setting\s*\(\s*'request\.jwt\.claim\.role'[^)]{0,40}\)` +
+  String.raw`|current_setting\s*\(\s*'request\.jwt\.claims'[^)]{0,40}\)\s*(?:::\s*jsonb?\s*)?->>\s*'role'` +
+  String.raw`|current_user)(?:\s*\))?(?:\s*::\s*text)?`;
+
+function markGates(expr: string): string {
+  return expr
+    .replace(new RegExp(`${ROLE_SOURCE}\\s*(=|<>|!=)\\s*'(\\w+)'(?:\\s*::\\s*text)?`, 'gi'),
+      (_m, op: string, role: string) => roleComparison(op, role.toLowerCase()))
+    .replace(new RegExp(`'(\\w+)'(?:\\s*::\\s*text)?\\s*(=|<>|!=)\\s*${ROLE_SOURCE}`, 'gi'),
+      (_m, role: string, op: string) => roleComparison(op, role.toLowerCase()))
+    .replace(/\bauth\s*\.\s*jwt\s*\(\s*\)\s*\)?\s*->>?\s*'(?:aud|aal|amr|is_anonymous)'/gi, GATE)
+    .replace(/\bauth\s*\.\s*(?:uid|jwt)\s*\(\s*\)(?:\s*\))?\s*is\s+not\s+null/gi, GATE)
+    .replace(/\bauth\s*\.\s*role\s*\(\s*\)/gi, NEUTRAL);
+}
+
+interface CallerFunctions {
+  /** Matches a call to a function whose body identifies the caller (null: none). */
+  isolating: RegExp | null;
+  /** Matches a call to a function whose body only checks that the caller is signed in. */
+  gate: RegExp | null;
+  /** Predicate text → classification, once the function sets are final. */
+  memo?: Map<string, Isolation>;
+}
+
+function callPattern(names: Set<string>): RegExp | null {
+  if (names.size === 0) return null;
+  const alternation = [...names].map((n) => n.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|');
+  return new RegExp(`(?:^|[^\\w$])"?(?:${alternation})"?\\s*\\(`, 'i');
+}
+
+type Isolation = 'isolating' | 'gate' | 'other';
+
+function classify(expr: string, fns: CallerFunctions): Isolation {
+  const cached = fns.memo?.get(expr);
+  if (cached) return cached;
+  const marked = markGates(expr);
+  const kind: Isolation =
+    CALLER_REF.test(marked) || fns.isolating?.test(marked) ? 'isolating'
+      : marked.includes(GATE) || fns.gate?.test(marked) ? 'gate'
+        : 'other';
+  fns.memo?.set(expr, kind);
+  return kind;
+}
+
+/** Classifies every function body; a helper that calls an isolating helper isolates too. */
+function classifyFunctions(bodies: Map<string, string>): CallerFunctions {
+  const isolating = new Set<string>();
+  const gate = new Set<string>();
+  for (let changed = true; changed;) {
+    changed = false;
+    const fns: CallerFunctions = { isolating: callPattern(isolating), gate: callPattern(gate) };
+    for (const [name, body] of bodies) {
+      if (isolating.has(name)) continue;
+      const kind = classify(body, fns);
+      if (kind === 'isolating') {
+        isolating.add(name);
+        gate.delete(name);
+        changed = true;
+      } else if (kind === 'gate' && !gate.has(name)) {
+        gate.add(name);
+        changed = true;
+      }
+    }
+  }
+  return { isolating: callPattern(isolating), gate: callPattern(gate), memo: new Map() };
+}
+
+const COMMANDS = ['SELECT', 'INSERT', 'UPDATE', 'DELETE'] as const;
+type Command = (typeof COMMANDS)[number];
+
+function covers(p: Policy, cmd: Command): boolean {
+  return p.command === 'ALL' || p.command === cmd;
+}
+
+/**
+ * The expression that decides which rows `cmd` reaches under this policy:
+ * USING for SELECT / DELETE / UPDATE (the rows a caller can see or target),
+ * WITH CHECK for INSERT (the rows a caller can create). A FOR ALL policy with
+ * only USING uses it as the check too, as PostgreSQL does.
+ */
+function predicateFor(p: Policy, cmd: Command): string | null {
+  if (cmd === 'INSERT') return p.withCheck ?? p.using;
+  if (cmd === 'UPDATE') return p.using ?? p.withCheck;
+  return p.using;
+}
+
+/** Policies whose roles include signed-in users: `authenticated`, or `public` (every role). */
+function reachesSignedIn(p: Policy): boolean {
+  return p.roles.some((r) => r === 'authenticated' || r === 'public');
+}
+
+const VERBS: Record<Command, string> = {
+  SELECT: 'read',
+  INSERT: 'create rows on behalf of',
+  UPDATE: 'overwrite',
+  DELETE: 'delete',
+};
+
 /** `DROP TABLE [IF EXISTS] a, b [CASCADE | RESTRICT]` → the tables it drops. */
 function droppedTables(flat: string): string[] | null {
   const m = /^drop\s+table\s+(?:if\s+exists\s+)?(.+?)(?:\s+(?:cascade|restrict))?\s*$/i.exec(flat);
@@ -299,15 +488,64 @@ export const rlsScanner: Scanner = {
 
   async run(ctx): Promise<ScanResult> {
     const result = emptyResult();
-    const tables = new Map<string, Table>();
-    const policies: Policy[] = [];
-    const definerFunctions = new Set<string>();
-    const publicBuckets: { id: string; file: string; line: number }[] = [];
     const findings: Finding[] = [];
     const suppressors = new Map<string, Suppressions>();
     const sources = new Map<string, string>();
+    let publicTableCount = 0;
+    let policyCount = 0;
 
     const sqlFiles = [...postgresSqlFiles(ctx)].sort();
+    for (const projectFiles of partitionIntoProjects(sqlFiles, ctx.root).values()) {
+      const project = analyseProject(ctx, projectFiles, sources, suppressors);
+      findings.push(...project.findings);
+      publicTableCount += project.publicTables;
+      policyCount += project.policies;
+    }
+
+    // Apply inline suppressions now that every finding has a location.
+    for (const f of findings) {
+      const sup = f.file ? suppressors.get(f.file) : undefined;
+      if (sup && f.line && sup.suppressed(f.line, f.id)) continue;
+      const src = f.file ? sources.get(f.file) : undefined;
+      if (src && f.line) f.snippet = snippetAt(src, f.line);
+      result.findings.push(f);
+    }
+
+    if (publicTableCount > 0) {
+      const unprotected = result.findings.filter((f) => f.id === 'CTS010').length;
+      result.checks.push({
+        label: `Row Level Security (${publicTableCount} public table${publicTableCount === 1 ? '' : 's'}, ${policyCount} polic${policyCount === 1 ? 'y' : 'ies'})`,
+        passed: unprotected === 0,
+      });
+    } else if (sqlFiles.length > 0) {
+      result.checks.push({
+        label: 'Row Level Security',
+        passed: true,
+        note: 'no CREATE TABLE statements found in the scanned SQL',
+      });
+    }
+    return result;
+  },
+};
+
+/**
+ * Replays one project's migrations into a schema model and judges it. Every
+ * table, policy, function and bucket here is local to the project: two apps
+ * in one repository (or this repository's test fixtures) each have their own
+ * database, and a policy in one says nothing about a table in the other.
+ */
+function analyseProject(
+  ctx: ProjectContext,
+  sqlFiles: string[],
+  sources: Map<string, string>,
+  suppressors: Map<string, Suppressions>,
+): { findings: Finding[]; publicTables: number; policies: number } {
+    const tables = new Map<string, Table>();
+    const policies: Policy[] = [];
+    const definerFunctions = new Set<string>();
+    const functionBodies = new Map<string, string>();
+    const publicBuckets: { id: string; file: string; line: number }[] = [];
+    const findings: Finding[] = [];
 
     // Pass 1: build a model of the schema by replaying every migration in order.
     for (const file of sqlFiles) {
@@ -459,6 +697,14 @@ export const rlsScanner: Scanner = {
           continue;
         }
 
+        // Every function body, so a policy calling a helper such as
+        // `is_org_member(org_id)` can be judged by what the helper checks.
+        const fnDecl = new RegExp(`^create\\s+(?:or\\s+replace\\s+)?function\\s+(${QUALIFIED_NAME})`, 'i').exec(flat);
+        if (fnDecl) {
+          const bare = normaliseTable(fnDecl[1]!).split('.').pop()!;
+          functionBodies.set(bare, flat.slice(fnDecl[0].length));
+        }
+
         // SECURITY DEFINER functions without a pinned search_path.
         if (/^create\s+(or\s+replace\s+)?function/i.test(flat) && /security\s+definer/i.test(flat)) {
           const declared = new RegExp(`^create\\s+(?:or\\s+replace\\s+)?function\\s+(${QUALIFIED_NAME})`, 'i').exec(flat)?.[1];
@@ -563,6 +809,11 @@ export const rlsScanner: Scanner = {
     }
 
     // Pass 2: judge the resulting schema.
+    const callerFns = classifyFunctions(functionBodies);
+    /** `table|command|policy` for each gate policy CTS014 reported, so CTS050 does not repeat it. */
+    const gateLeaks = new Set<string>();
+    /** `table|command|policy` for the scoped policies those gates defeat. */
+    const defeated = new Set<string>();
     const policiesByTable = new Map<string, Policy[]>();
     for (const p of policies) {
       const list = policiesByTable.get(p.table) ?? [];
@@ -626,18 +877,90 @@ export const rlsScanner: Scanner = {
       const sensitive = table.columns.filter((c) =>
         SENSITIVE_COLUMNS.some((s) => c === s || c.includes(s)),
       );
-      // Tenant isolation means comparing a row to *who* the caller is: auth.uid(),
-      // a JWT claim, or the request claims. `auth.role() = 'authenticated'` only
-      // says the caller is signed in — every signed-in user then sees every
-      // row, which is exactly what CTS014 is about — so it does not count.
+      // Tenant isolation means comparing a row to *who* the caller is (see
+      // classify). `auth.role() = 'authenticated'` or `auth.uid() IS NOT NULL`
+      // only says the caller is signed in — every signed-in user then sees
+      // every row, which is exactly what CTS014 is about — so it does not count.
       const referencesAuth = tablePolicies.some((p) =>
-        /auth\.uid\(\)|auth\.jwt\(\)|current_setting\s*\(/i.test(
-          `${p.using ?? ''} ${p.withCheck ?? ''}`,
-        ),
+        [p.using, p.withCheck].some((e) => e !== null && classify(e, callerFns) === 'isolating'),
       );
       // A policy that only admits the service role reaches no end user (and the
       // service role bypasses RLS anyway), so it cannot leak rows across users.
       const reachesUsers = grantingPolicies.some((p) => !serviceRoleOnly(p));
+
+      if (ownerColumn && referencesAuth) {
+        // Some policy isolates, but PostgreSQL ORs the permissive policies for
+        // each command: one "signed in is enough" policy beside a scoped one
+        // makes the scoping dead code. Judged per command, with FOR ALL
+        // counting towards each; a RESTRICTIVE policy that isolates is AND-ed
+        // on and closes the leak for its commands.
+        //
+        // Only gates count (`auth.role() = 'authenticated'`, `auth.uid() IS
+        // NOT NULL`): a constant `USING (true)` or a row filter such as
+        // `published = true` is an explicit decision to publish, and CTS012 /
+        // CTS013 judge those. A gate on SELECT is reported only beside a scoped
+        // SELECT policy — "members can read every comment" is a common,
+        // deliberate design — while a gate on a write is reported whenever the
+        // table is otherwise per-user: letting every signed-in user overwrite
+        // or delete everyone's rows is not.
+        const leaks = new Map<Policy, { commands: Command[]; scopedBy: Set<string> }>();
+        for (const cmd of COMMANDS) {
+          const restrictiveIsolates = tablePolicies.some((p) => {
+            const e = predicateFor(p, cmd);
+            return !p.permissive && covers(p, cmd) && reachesSignedIn(p) && e !== null &&
+              classify(e, callerFns) === 'isolating';
+          });
+          if (restrictiveIsolates) continue;
+          const reach = grantingPolicies.filter((p) => covers(p, cmd) && reachesSignedIn(p) && !serviceRoleOnly(p));
+          const kind = (p: Policy): Isolation | null => {
+            const e = predicateFor(p, cmd);
+            return e === null ? null : classify(e, callerFns);
+          };
+          const gates = reach.filter((p) => kind(p) === 'gate');
+          if (gates.length === 0) continue;
+          const scoped = reach.filter((p) => kind(p) === 'isolating');
+          if (cmd === 'SELECT' && scoped.length === 0) continue;
+          for (const g of gates) {
+            const entry = leaks.get(g) ?? { commands: [], scopedBy: new Set<string>() };
+            entry.commands.push(cmd);
+            for (const s of scoped) {
+              entry.scopedBy.add(s.name);
+              defeated.add(`${table.name}|${cmd}|${s.name}`);
+            }
+            leaks.set(g, entry);
+            gateLeaks.add(`${table.name}|${cmd}|${g.name}`);
+          }
+        }
+        for (const [g, { commands, scopedBy }] of leaks) {
+          const scopedNames = [...scopedBy];
+          const predicate = (predicateFor(g, commands[0]!) ?? '').replace(/\s+/g, ' ').trim();
+          findings.push({
+            id: 'CTS014',
+            severity: 'high',
+            title: 'A policy lets every signed-in user past a per-user table’s isolation',
+            detail:
+              `Policy \`${g.name}\` on \`${table.name}\` grants ${commands.join(', ')} with ` +
+              `\`${predicate.length > 80 ? `${predicate.slice(0, 77)}...` : predicate}\`, which only checks ` +
+              'that the caller is signed in, not who they are. PostgreSQL ORs permissive policies for ' +
+              'the same command' +
+              (scopedNames.length
+                ? `, so the \`${ownerColumn}\` scoping in ${scopedNames.map((n) => `\`${n}\``).join(', ')} never narrows anything`
+                : '') +
+              `: any authenticated user can ${commands.map((c) => VERBS[c]).join(' / ')} every other user’s rows.`,
+            fix:
+              `Scope \`${g.name}\` to the caller — USING (${ownerColumn} = (SELECT auth.uid()))` +
+              (commands.includes('INSERT') || commands.includes('UPDATE')
+                ? ` WITH CHECK (${ownerColumn} = (SELECT auth.uid()))`
+                : '') +
+              ' — or drop it if the scoped policies already cover what it was for.',
+            file: g.file,
+            line: g.line,
+            cwe: 'CWE-639: Authorization Bypass Through User-Controlled Key',
+            owasp: 'A01:2025 - Broken Access Control',
+            meta: { table: table.name, ownerColumn, policy: g.name, commands, scopedBy: scopedNames },
+          });
+        }
+      }
 
       if (ownerColumn && !referencesAuth && reachesUsers) {
         findings.push({
@@ -754,6 +1077,13 @@ export const rlsScanner: Scanner = {
       const [table, cmd, role] = key.split('|');
       const names = [...new Set(group.map((p) => p.name))];
       if (names.length < 2) continue;
+      // CTS014 already reported this exact overlap — a gate OR'd onto the
+      // scoped policies it defeats — with the specific consequence. The same
+      // root cause and the same fix; a second, vaguer finding adds nothing.
+      if (
+        names.some((n) => gateLeaks.has(`${table}|${cmd}|${n}`)) &&
+        names.every((n) => gateLeaks.has(`${table}|${cmd}|${n}`) || defeated.has(`${table}|${cmd}|${n}`))
+      ) continue;
       const dedupe = `${table}|${cmd}|${role}|${names.join(',')}`;
       if (alreadyReported.has(dedupe)) continue;
       alreadyReported.add(dedupe);
@@ -809,31 +1139,11 @@ export const rlsScanner: Scanner = {
       });
     }
 
-    // Apply inline suppressions now that every finding has a location.
-    for (const f of findings) {
-      const sup = f.file ? suppressors.get(f.file) : undefined;
-      if (sup && f.line && sup.suppressed(f.line, f.id)) continue;
-      const src = f.file ? sources.get(f.file) : undefined;
-      if (src && f.line) f.snippet = snippetAt(src, f.line);
-      result.findings.push(f);
-    }
-
-    const publicTables = [...tables.values()].filter((t) => t.createdInPublic);
-    if (publicTables.length > 0) {
-      const unprotected = result.findings.filter((f) => f.id === 'CTS010').length;
-      result.checks.push({
-        label: `Row Level Security (${publicTables.length} public table${publicTables.length === 1 ? '' : 's'}, ${policies.length} polic${policies.length === 1 ? 'y' : 'ies'})`,
-        passed: unprotected === 0,
-      });
-    } else if (sqlFiles.length > 0) {
-      result.checks.push({
-        label: 'Row Level Security',
-        passed: true,
-        note: 'no CREATE TABLE statements found in the scanned SQL',
-      });
-    }
-    return result;
-  },
-};
+    return {
+      findings,
+      publicTables: [...tables.values()].filter((t) => t.createdInPublic).length,
+      policies: policies.length,
+    };
+}
 
 export const _internals = { parseColumns };
