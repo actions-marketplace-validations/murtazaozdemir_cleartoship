@@ -8,7 +8,7 @@ import {
 import { readBalanced } from '../utils/sql.js';
 import type { Finding, ProjectContext, ScanResult, Scanner, Severity } from '../internal.js';
 import { existsSync } from 'node:fs';
-import { dirname, join, relative, resolve, isAbsolute } from 'node:path';
+import { basename, dirname, join, relative, resolve, isAbsolute } from 'node:path';
 
 /* ------------------------------------------------------------------------- *
  * Which .sql files are PostgreSQL at all.
@@ -73,6 +73,8 @@ interface DialectModel {
   d1ConfigDirs: Set<string>;
   /** Absolute D1 `migrations_dir` paths, resolved against their config. */
   d1MigrationDirs: Set<string>;
+  /** Absolute Prisma migrations dirs whose `migration_lock.toml` names a non-Postgres provider. */
+  prismaOtherDirs: Set<string>;
   /** Directory → whether its nearest package.json depends on Supabase (null: none found). */
   pkgCache: Map<string, boolean | null>;
 }
@@ -86,7 +88,15 @@ function buildDialectModel(ctx: ProjectContext): DialectModel {
   // so configs are looked up on disk rather than taken from ctx.files.
   const dirs = new Set<string>();
   for (const f of ctx.files) for (const d of ancestors(dirname(f), ctx.root)) dirs.add(d);
+  const prismaOtherDirs = new Set<string>();
   for (const dir of dirs) {
+    // Prisma writes the datasource provider next to its migrations. Its
+    // SQLite output (`"id" TEXT NOT NULL PRIMARY KEY`, `DATETIME`) carries no
+    // SQLite-only syntax, so without this a Prisma-on-SQLite app read as a
+    // Supabase table with RLS off on every model.
+    const lock = read(join(dir, 'migration_lock.toml'));
+    const provider = lock === null ? undefined : /^\s*provider\s*=\s*"([^"]+)"/m.exec(lock)?.[1];
+    if (provider && !/^(postgres(ql)?|cockroachdb)$/i.test(provider)) prismaOtherDirs.add(dir);
     for (const name of WRANGLER_CONFIGS) {
       const path = join(dir, name);
       if (!existsSync(path)) continue;
@@ -97,7 +107,7 @@ function buildDialectModel(ctx: ProjectContext): DialectModel {
       for (const m of declared.length ? declared : ['migrations']) d1MigrationDirs.add(resolve(dir, m));
     }
   }
-  return { d1ConfigDirs, d1MigrationDirs, pkgCache: new Map() };
+  return { d1ConfigDirs, d1MigrationDirs, prismaOtherDirs, pkgCache: new Map() };
 }
 
 function nearestPackageSupabase(model: DialectModel, file: string, root: string): boolean | null {
@@ -132,7 +142,10 @@ const dialectCache = new WeakMap<ProjectContext, string[]>();
  *     config declares `d1_databases` while its nearest package.json does not
  *     depend on Supabase; or
  *   - it uses SQLite-only syntax (AUTOINCREMENT, unixepoch(), …) and no
- *     Postgres-only syntax.
+ *     Postgres-only syntax; or
+ *   - it sits under a Prisma migrations dir whose `migration_lock.toml` names
+ *     a provider other than PostgreSQL/CockroachDB, and has no Postgres-only
+ *     syntax.
  * Included — everything else, provided something says Postgres/Supabase: the
  * file is under `supabase/`, its nearest package.json depends on Supabase, or
  * the repo-wide signals (the root dependency set, a root `supabase/` dir, RLS
@@ -155,7 +168,8 @@ function postgresSqlFiles(ctx: ProjectContext): string[] {
       const inMigrationsDir = [...model.d1MigrationDirs].some((d) => isWithin(d, file));
       const underD1Worker = !pkgSupabase && [...model.d1ConfigDirs].some((d) => isWithin(d, file));
       const sqliteDialect = SQLITE_ONLY.test(src) && !POSTGRES_ONLY.test(src);
-      if (inMigrationsDir || underD1Worker || sqliteDialect) continue;
+      const prismaOther = [...model.prismaOtherDirs].some((d) => isWithin(d, file)) && !POSTGRES_ONLY.test(src);
+      if (inMigrationsDir || underD1Worker || sqliteDialect || prismaOther) continue;
     }
     candidates.push({ file, src, perFile: underSupabase || idioms || pkgSupabase });
   }
@@ -163,6 +177,56 @@ function postgresSqlFiles(ctx: ProjectContext): string[] {
   const out = candidates.filter((c) => repoSignal || c.perFile).map((c) => c.file);
   dialectCache.set(ctx, out);
   return out;
+}
+
+/* ------------------------------------------------------------------------- *
+ * Which .sql files belong to the same database.
+ *
+ * A whole-repo scan used to replay every .sql file into one schema, so two
+ * projects' migrations mixed: a monorepo's second app, or this repository's
+ * own test fixtures, had one project's policies judged against the other's
+ * tables (the clean fixture got the vulnerable one's CTS050, the vulnerable
+ * one lost a CTS014). Each file now belongs to the nearest directory, walking
+ * up from it towards the scan root, that is a project root:
+ *
+ *   - it has a `supabase/` directory holding `config.toml` or `migrations/`
+ *     (the Supabase CLI layout: migrations/, seed.sql and schemas/ all sit
+ *     under it, so every one of them resolves to the same parent); or
+ *   - it has a `package.json`; or
+ *   - it is the scan root.
+ *
+ * A directory named `supabase` is never a root itself, even with a
+ * package.json of its own (edge-function tooling often puts one there), so
+ * `supabase/migrations` always joins the app that owns the `supabase/` dir.
+ * A single-app repo — root package.json, SQL in supabase/, db/ or migrations/
+ * — is therefore one project; `packages/db/supabase/…` in a monorepo is its
+ * own.
+ * ------------------------------------------------------------------------- */
+
+function isProjectRoot(dir: string): boolean {
+  if (basename(dir) === 'supabase') return false;
+  if (existsSync(join(dir, 'package.json'))) return true;
+  const supa = join(dir, 'supabase');
+  return existsSync(join(supa, 'config.toml')) || existsSync(join(supa, 'migrations'));
+}
+
+/** Groups files by project root; each group keeps the input (sorted) order. */
+function partitionIntoProjects(files: string[], root: string): Map<string, string[]> {
+  const rootCache = new Map<string, boolean>();
+  const projects = new Map<string, string[]>();
+  for (const file of files) {
+    let owner = root;
+    for (const dir of ancestors(dirname(file), root)) {
+      if (dir === root || !isWithin(root, dir)) break;
+      let isRoot = rootCache.get(dir);
+      if (isRoot === undefined) { isRoot = isProjectRoot(dir); rootCache.set(dir, isRoot); }
+      if (isRoot) { owner = dir; break; }
+    }
+    const list = projects.get(owner) ?? [];
+    list.push(file);
+    projects.set(owner, list);
+  }
+  return projects;
 }
 
 const OWNER_COLUMNS = [
@@ -299,15 +363,63 @@ export const rlsScanner: Scanner = {
 
   async run(ctx): Promise<ScanResult> {
     const result = emptyResult();
+    const findings: Finding[] = [];
+    const suppressors = new Map<string, Suppressions>();
+    const sources = new Map<string, string>();
+    let publicTableCount = 0;
+    let policyCount = 0;
+
+    const sqlFiles = [...postgresSqlFiles(ctx)].sort();
+    for (const projectFiles of partitionIntoProjects(sqlFiles, ctx.root).values()) {
+      const project = analyseProject(ctx, projectFiles, sources, suppressors);
+      findings.push(...project.findings);
+      publicTableCount += project.publicTables;
+      policyCount += project.policies;
+    }
+
+    // Apply inline suppressions now that every finding has a location.
+    for (const f of findings) {
+      const sup = f.file ? suppressors.get(f.file) : undefined;
+      if (sup && f.line && sup.suppressed(f.line, f.id)) continue;
+      const src = f.file ? sources.get(f.file) : undefined;
+      if (src && f.line) f.snippet = snippetAt(src, f.line);
+      result.findings.push(f);
+    }
+
+    if (publicTableCount > 0) {
+      const unprotected = result.findings.filter((f) => f.id === 'CTS010').length;
+      result.checks.push({
+        label: `Row Level Security (${publicTableCount} public table${publicTableCount === 1 ? '' : 's'}, ${policyCount} polic${policyCount === 1 ? 'y' : 'ies'})`,
+        passed: unprotected === 0,
+      });
+    } else if (sqlFiles.length > 0) {
+      result.checks.push({
+        label: 'Row Level Security',
+        passed: true,
+        note: 'no CREATE TABLE statements found in the scanned SQL',
+      });
+    }
+    return result;
+  },
+};
+
+/**
+ * Replays one project's migrations into a schema model and judges it. Every
+ * table, policy, function and bucket here is local to the project: two apps
+ * in one repository (or this repository's test fixtures) each have their own
+ * database, and a policy in one says nothing about a table in the other.
+ */
+function analyseProject(
+  ctx: ProjectContext,
+  sqlFiles: string[],
+  sources: Map<string, string>,
+  suppressors: Map<string, Suppressions>,
+): { findings: Finding[]; publicTables: number; policies: number } {
     const tables = new Map<string, Table>();
     const policies: Policy[] = [];
     const definerFunctions = new Set<string>();
     const publicBuckets: { id: string; file: string; line: number }[] = [];
     const findings: Finding[] = [];
-    const suppressors = new Map<string, Suppressions>();
-    const sources = new Map<string, string>();
-
-    const sqlFiles = [...postgresSqlFiles(ctx)].sort();
 
     // Pass 1: build a model of the schema by replaying every migration in order.
     for (const file of sqlFiles) {
@@ -809,31 +921,11 @@ export const rlsScanner: Scanner = {
       });
     }
 
-    // Apply inline suppressions now that every finding has a location.
-    for (const f of findings) {
-      const sup = f.file ? suppressors.get(f.file) : undefined;
-      if (sup && f.line && sup.suppressed(f.line, f.id)) continue;
-      const src = f.file ? sources.get(f.file) : undefined;
-      if (src && f.line) f.snippet = snippetAt(src, f.line);
-      result.findings.push(f);
-    }
-
-    const publicTables = [...tables.values()].filter((t) => t.createdInPublic);
-    if (publicTables.length > 0) {
-      const unprotected = result.findings.filter((f) => f.id === 'CTS010').length;
-      result.checks.push({
-        label: `Row Level Security (${publicTables.length} public table${publicTables.length === 1 ? '' : 's'}, ${policies.length} polic${policies.length === 1 ? 'y' : 'ies'})`,
-        passed: unprotected === 0,
-      });
-    } else if (sqlFiles.length > 0) {
-      result.checks.push({
-        label: 'Row Level Security',
-        passed: true,
-        note: 'no CREATE TABLE statements found in the scanned SQL',
-      });
-    }
-    return result;
-  },
-};
+    return {
+      findings,
+      publicTables: [...tables.values()].filter((t) => t.createdInPublic).length,
+      policies: policies.length,
+    };
+}
 
 export const _internals = { parseColumns };
