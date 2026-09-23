@@ -12,23 +12,56 @@ from where, and under which licence.
 - Licence: Apache License 2.0 — full text in `LICENSES/guardvibe-Apache-2.0.txt`,
   upstream NOTICE in `LICENSES/guardvibe-NOTICE.txt`
 
-468 security rules are vendored verbatim under `src/vendor/guardvibe/rules/`.
-Each file carries a provenance header. Rule content is **unmodified**; the only
-changes are the added headers and an aggregating `index.ts` written by this
-project.
+468 security rules are vendored under `src/vendor/guardvibe/rules/`. Rule
+content — ids, patterns, names, descriptions, fixes — is **unmodified** in those
+files. The changes to the files themselves are: a provenance header added to
+each, **import paths rewritten** for this package's layout (e.g. `./types.js`),
+and an aggregating `index.ts` written by this project.
 
-Modifications, as required by Apache-2.0 §4(b), are made at runtime in
-`src/scanners/community.ts` rather than in the vendored files:
+Modifications to how the rules behave, stated here as Apache-2.0 §4(b)
+requires, are all made at runtime in `src/scanners/community.ts` (and, for
+the CVE rules, `src/scan.ts`) rather than in the vendored files:
 
 - **27 rules are superseded** by ClearToShip's own AST and schema checks, which
   reason over a whole function body or a replayed migration rather than a fixed
   character window. Running both would double-report the same defect and import
-  the less precise location. Each is listed with the rule that replaces it.
-- **5 rules are withheld** as measurably noisy in this tool's context — for
+  the less precise location. Each is listed with the rule that replaces it
+  (`SUPERSEDED`).
+- **6 rules are withheld** as measurably noisy in this tool's context — for
   example `VG543`, which matches `; DROP|DELETE|INSERT …` anywhere in a `.sql`
   file and therefore fires on the normal shape of every migration. Each is
-  listed with its reason.
-- Findings in test, fixture and documentation paths are reported at `low`.
+  listed with its reason (`WITHHELD`).
+- **Rules for a platform the project does not use are skipped**: the 10 React
+  Native rules unless the project is React Native; rules naming Supabase or
+  Firebase unless that is a dependency; and `VG132` (request-body size limit)
+  on Next.js, which already imposes one. The report names what was skipped.
+- **21 rules carry a match guard** (`MATCH_GUARDS`): an extra test a match must
+  pass, for a shape the upstream regex cannot exclude — a `"link": true`
+  lockfile entry has no integrity hash by design, `querySelectorAll` is not a
+  SQL call, `eval()` inside a sentence is prose, a bounded agent loop written
+  with the AI SDK's `stopWhen` is not unbounded.
+- **3 rules are manifest-only** (`MANIFEST_ONLY`): they are not run over
+  lockfiles, where they matched ordinary transitive package names.
+- **Some rule patterns are replaced at runtime** where the upstream regex can
+  backtrack catastrophically (ReDoS) on hostile input; the replacement matches
+  the same intended shape and each override is listed with its reason in
+  `src/scanners/community.ts`. The vendored file keeps the original pattern.
+- **A match inside a comment is dropped.** Nothing in the ruleset targets
+  comment content, and a commented-out call is not a call.
+- **Severity adjustments**: a vendored CVE rule matching a package under
+  `devDependencies` (or a lockfile entry marked `"dev": true`) is reported at
+  `low`; `VG105` is reported at `medium` unless the match actually accepts
+  `alg: none`; findings in test, fixture and documentation paths are reported
+  at `low`, and in build and maintenance tooling (`scripts/`, `*.config.*`) one
+  severity step lower. Each adjusted finding says why in its text.
+- **The vendored CVE-version rules stand down when OSV answers**, since live
+  advisory data supersedes a hard-coded version range; with `--offline` they
+  are the fallback.
+- **OWASP labels are normalised** onto one 2025 taxonomy (upstream mixes
+  editions); the original label is kept in `meta.owaspUpstream`.
+- At most three matches per rule per file are reported, and files over 400 KB
+  are not run through the ruleset; the scan is then reported as incomplete for
+  them rather than clean.
 
 Every vendored finding carries `meta.source: "guardvibe"` and its attribution
 string, so provenance survives into JSON and SARIF output.

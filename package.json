@@ -1,6 +1,7 @@
 {
   "name": "cleartoship",
   "version": "0.13.10",
+  "private": true,
   "description": "The 30-second pre-launch security clearance for AI-built apps. Statically checks the agent surface no runtime scanner sees before deploy \u2014 ungated tools, model output in a shell, prompts in the client bundle \u2014 plus missing Server Action auth, Supabase RLS holes, hallucinated npm packages and leaked keys. Free while in beta.",
   "keywords": [
     "security",
@@ -50,7 +51,7 @@
     "node": "^22.18.0 || >=24.11.0"
   },
   "scripts": {
-    "build": "tsc -p tsconfig.json && chmod +x dist/cli.js",
+    "build": "node -e \"require('node:fs').rmSync('dist',{recursive:true,force:true})\" && tsc -p tsconfig.json && chmod +x dist/cli.js",
     "bundle": "node scripts/bundle.mjs",
     "dev": "tsc -p tsconfig.json --watch",
     "test": "node --test test/*.test.js",

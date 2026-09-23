@@ -12,12 +12,17 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
+permissions:
+  contents: read
+
 jobs:
   # The vulnerable fixture must make the action fail and surface findings.
   detects-vulnerable:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - id: scan
         continue-on-error: true
         uses: ./
@@ -37,7 +42,9 @@ jobs:
   passes-clean:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - id: scan
         uses: ./
         with:
@@ -49,6 +56,13 @@ jobs:
         run: |
           test "${{ steps.scan.outputs.verdict }}" = "clear" || { echo "expected verdict=clear"; exit 1; }
           test "${{ steps.scan.outputs.total }}" = "0" || { echo "expected zero findings, got ${{ steps.scan.outputs.total }}"; exit 1; }
+          test "${{ steps.scan.outputs.incomplete }}" = "0" || { echo "expected a complete scan, got incomplete=${{ steps.scan.outputs.incomplete }}"; exit 1; }
+          # Reports are written outside the checkout, never into the tree under review.
+          case "${{ steps.scan.outputs.report-json }}" in
+            "$RUNNER_TEMP"/*) test -s "${{ steps.scan.outputs.report-json }}" ;;
+            *) echo "report-json is not under RUNNER_TEMP: ${{ steps.scan.outputs.report-json }}"; exit 1 ;;
+          esac
+          test ! -e test/fixtures/clean-app/cleartoship.json || { echo "a report was written into the checkout"; exit 1; }
           echo "clean fixture: clear to ship"
 
   # The path real consumers actually take: the release bundle, plus the sticky PR
@@ -56,13 +70,19 @@ jobs:
   # the comment step only fires on pull_request — so a broken release or a broken
   # comment would have looked green indefinitely.
   published-and-comment:
-    if: github.event_name == 'pull_request'
+    # Not on pull requests from forks: their token is read-only, so the Action
+    # skips the comment by design and there is nothing sticky to assert.
+    if: >-
+      github.event_name == 'pull_request'
+      && github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-latest
     permissions:
       contents: read
       pull-requests: write   # the sticky comment; the repo default is read-only
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - id: scan
         uses: ./
         with:
@@ -76,14 +96,29 @@ jobs:
       # There is deliberately no check that `npx cleartoship` works: ClearToShip is
       # not published on npm, and `npx --yes` would run whatever the registry serves
       # under that unclaimed name, in a job that holds `pull-requests: write`.
-      - name: Assert it ran the release bundle
+      # One window is allowed: until the first release with a build-provenance
+      # attestation exists, `latest` names a bundle the Action refuses to run
+      # unverified, so a checkout build is the correct answer and not a fallback
+      # hiding a broken download. Once the latest release is newer than 0.13.10,
+      # anything but `release` fails this job.
+      - name: Assert it ran the verified release bundle
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RESOLVED: ${{ steps.scan.outputs.resolved }}
         run: |
-          test "${{ steps.scan.outputs.resolved }}" = "release" || {
-            echo "::error::expected resolved=release, got '${{ steps.scan.outputs.resolved }}'."
-            echo "::error::The Action fell back to a checkout build, so the release download"
-            echo "::error::path that real consumers take was not the one graded."
-            exit 1
-          }
+          if [ "$RESOLVED" = "release" ]; then
+            echo "ran the release bundle, provenance verified"
+            exit 0
+          fi
+          latest=$(gh api "repos/${GITHUB_REPOSITORY}/releases/latest" --jq .tag_name)
+          if node -e 'const [a,b,c]=process.argv[1].replace(/^v/,"").split(/[.-]/).map(Number); process.exit(a*1e6+b*1e3+c <= 13010 ? 0 : 1)' "$latest"; then
+            echo "::notice::latest is ${latest}, which predates attestations; a checkout build is expected until the next release."
+            exit 0
+          fi
+          echo "::error::expected resolved=release, got '${RESOLVED}' with latest=${latest}."
+          echo "::error::The Action fell back to a checkout build, so the release download"
+          echo "::error::path that real consumers take was not the one graded."
+          exit 1
 
       - name: Assert the release build returns a clean verdict
         run: |

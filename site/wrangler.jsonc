@@ -3,9 +3,11 @@
   "name": "cleartoship",
   "main": "src/index.ts",
   "compatibility_date": "2026-08-20",
-  // Explicit even though default-on at this compatibility_date — resilient to
-  // future default changes. Needed for node:crypto (Ed25519 JWK import) in the
-  // license-signing code path.
+  // Not required by anything in src/ today: license signing imports its
+  // Ed25519 JWK through WebCrypto (crypto.subtle), not node:crypto, and the
+  // stripe SDK resolves to its `workerd` build, which imports no Node
+  // built-ins. Kept on so a dependency that does reach for one keeps working;
+  // removing it is a behaviour change to test with `wrangler dev` first.
   "compatibility_flags": ["nodejs_compat"],
   "assets": {
     "directory": "./public",

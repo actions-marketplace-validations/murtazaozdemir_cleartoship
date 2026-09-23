@@ -12,6 +12,9 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
+permissions:
+  contents: read
+
 jobs:
   test:
     runs-on: ubuntu-latest
@@ -19,8 +22,10 @@ jobs:
       matrix:
         node: ['22.18.0', 22, 24]
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-node@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: ${{ matrix.node }}
           cache: npm
@@ -31,8 +36,10 @@ jobs:
   self-scan:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-node@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 22
           cache: npm
@@ -43,6 +50,13 @@ jobs:
       # README, the manifests, the shipped Action and the landing page are all
       # part of what this publishes, and a self-scan that read none of them let
       # a false positive on this project's own README survive a release.
+      #
+      # Online, on purpose, and without --allow-incomplete: the dependency
+      # checks on this project's own package.json only run with the network,
+      # and GitHub-hosted runners have it. The cost is that an npm or OSV
+      # outage makes this step exit 3 (incomplete) instead of passing. Re-run
+      # it; do not add --offline or --allow-incomplete to turn it green, since
+      # a scan that did not finish is what this tool refuses to call clear.
       - run: >-
           node dist/cli.js
           src site examples scripts .github
@@ -53,21 +67,10 @@ jobs:
   version-consistency:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # One script, so ci.yml and release.yml cannot drift apart. It covers
+      # README.md, examples/*.yml and the landing page (site/public/*.html).
       - name: Docs must pin the version this repo declares
-        run: |
-          # action.yml resolves its own version without a literal, because that
-          # line was twice left naming the previous release during a bump. Prose
-          # cannot do that, so it is asserted instead.
-          ver=$(node -p "require('./package.json').version")
-          # Every version literal that names this package, wherever it appears:
-          # `uses: …@vX`, and any release-download URL.
-          bad=$(grep -ohE '(cleartoship@|cleartoship/releases/download/)v[0-9]+\.[0-9]+\.[0-9]+' \
-                  examples/security.yml README.md \
-                | grep -oE 'v[0-9]+\.[0-9]+\.[0-9]+' | sort -u | grep -vx "v${ver}" || true)
-          if [ -n "$bad" ]; then
-            echo "::error::docs name $(echo $bad) but package.json declares v${ver}"
-            grep -nE '(cleartoship@|cleartoship/releases/download/)v[0-9]' examples/security.yml README.md
-            exit 1
-          fi
-          echo "every version literal in the docs says v${ver}"
+        run: scripts/check-version-pins.sh

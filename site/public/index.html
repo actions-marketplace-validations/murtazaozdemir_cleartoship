@@ -269,7 +269,7 @@
   <section style="border-top:0; padding-top:8px">
     <div class="wrap">
       <div class="stats">
-        <div class="stat"><div class="n">36</div><div class="l">first-party rules for the AI stack</div></div>
+        <div class="stat"><div class="n">46</div><div class="l">first-party rules for the AI stack, agents included</div></div>
         <div class="stat"><div class="n">234</div><div class="l">credential patterns, entropy-gated</div></div>
         <div class="stat"><div class="n">OSV</div><div class="l">live CVE data, not stale regexes</div></div>
         <div class="stat"><div class="n">0</div><div class="l">accounts, uploads or config</div></div>
@@ -284,7 +284,8 @@
       <h2>The gaps an LLM leaves behind</h2>
       <p class="section-lede">
         The failure mode is almost never a dangerous line of code — it's an <strong>absent</strong>
-        one. Every finding maps to OWASP Top&nbsp;10:2025 and a CWE, and comes with the exact fix.
+        one. Every finding maps to OWASP Top&nbsp;10:2025 and comes with the exact fix; ClearToShip's
+        own rules and the gitleaks credential rules name a CWE as well.
       </p>
       <div class="groups">
 
@@ -327,6 +328,25 @@
           <div class="rule"><span class="sev sev-h"></span><span class="id">GL-*</span><span class="txt">219 more credential providers, gated on Shannon entropy</span></div>
         </div>
 
+        <div class="group">
+          <h3><span class="ic">🤖</span> LLM &amp; agent surface</h3>
+          <p class="sub">The source-side slices of the OWASP Top 10 for LLM Apps (2026)</p>
+          <div class="rule"><span class="sev sev-h"></span><span class="id">CTS080</span><span class="txt">Caller text interpolated into the instruction text itself (LLM01)</span></div>
+          <div class="rule"><span class="sev sev-m"></span><span class="id">CTS081</span><span class="txt">Request-reachable model call with no <code>max_tokens</code> ceiling (LLM06)</span></div>
+          <div class="rule"><span class="sev sev-m"></span><span class="id">CTS082</span><span class="txt">System prompt in a <code>'use client'</code> module, shipped in the bundle (LLM08)</span></div>
+          <div class="rule"><span class="sev sev-h"></span><span class="id">CTS083</span><span class="txt">Agent tool that deletes, pays, mails or shells out with no approval step (LLM03)</span></div>
+          <div class="rule"><span class="sev sev-c"></span><span class="id">CTS084</span><span class="txt">Model output reaching <code>eval</code>, a shell, raw SQL or the DOM (LLM10)</span></div>
+          <div class="rule"><span class="sev sev-h"></span><span class="id">CTS085</span><span class="txt">A branch or access check that turns on what the model said (LLM07)</span></div>
+        </div>
+
+        <div class="group">
+          <h3><span class="ic">🧯</span> Logging, errors &amp; deserialization</h3>
+          <p class="sub">The statically knowable slices of A08, A09 and A10</p>
+          <div class="rule"><span class="sev sev-h"></span><span class="id">CTS070</span><span class="txt">Secret, token or PII — or a whole request body — written to a log</span></div>
+          <div class="rule"><span class="sev sev-h"></span><span class="id">CTS071</span><span class="txt">Security check that fails open: <code>catch { return true }</code></span></div>
+          <div class="rule"><span class="sev sev-h"></span><span class="id">CTS072</span><span class="txt">Untrusted data through <code>pickle.loads</code>, <code>unserialize</code> or unsafe <code>yaml.load</code></span></div>
+        </div>
+
       </div>
     </div>
   </section>
@@ -335,11 +355,13 @@
   <section id="how">
     <div class="wrap">
       <p class="kicker">How it works</p>
-      <h2>Four static scanners. No database. No upload.</h2>
+      <h2>Seven static scanners. No database. No upload.</h2>
       <p class="section-lede">
-        It reads your repo and exits non-zero if you shouldn't deploy. Everything runs on your
-        machine or your CI runner — the only network calls are anonymous version lookups you can
-        turn off with <code>--offline</code>.
+        It reads your repo and exits non-zero if you shouldn't deploy — or if it could not read
+        everything, because "found nothing" and "didn't finish" are different answers. Everything
+        runs on your machine or your CI runner — the only network calls are anonymous package
+        lookups (names to npm and PyPI, names and versions to OSV) that you can turn off with
+        <code>--offline</code>.
       </p>
       <div class="steps">
         <div class="step">
@@ -363,7 +385,23 @@
           <div class="num">04 · Secrets</div>
           <h3>Credentials &amp; client boundary</h3>
           <p>Candidate JWTs are decoded and reported only when the payload says <code>role: service_role</code>. 234 patterns in all, each gated on entropy so <code>your_api_key_here</code> never reads as a breach.</p>
-          <div class="prov">gitleaks (MIT) · guardvibe (Apache-2.0)</div>
+          <div class="prov">gitleaks (MIT)</div>
+        </div>
+        <div class="step">
+          <div class="num">05 · AST</div>
+          <h3>Logging, errors &amp; deserialization</h3>
+          <p>Secrets and request bodies written to logs, security checks that fail open or swallow their error, and untrusted data handed to <code>pickle</code>, <code>unserialize</code> or an unsafe YAML loader.</p>
+        </div>
+        <div class="step">
+          <div class="num">06 · AST</div>
+          <h3>LLM &amp; agent risk</h3>
+          <p>Follows what a model returned into the sinks that run it, and reads each agent tool's body for an action nobody can undo with no approval step in front of it. Six rules, CTS080–CTS085.</p>
+        </div>
+        <div class="step" style="grid-column: 1 / -1">
+          <div class="num">07 · Rules</div>
+          <h3>Community ruleset</h3>
+          <p>435 vendored rules for the ground the AST scanners don't cover — Dockerfiles, Terraform, GitHub Actions pinning, MCP tool runtimes, Go and shell. Where a first-party check is more precise, the vendored rule is switched off in its favour.</p>
+          <div class="prov">guardvibe (Apache-2.0)</div>
         </div>
       </div>
     </div>
@@ -384,8 +422,8 @@
         </div>
         <div class="group" style="padding-bottom:22px">
           <h3><span class="ic">⎇</span> GitHub Action</h3>
-          <div class="badge-code">- uses: actions/checkout@v4</div>
-          <div class="badge-code">- uses: murtazaozdemir/cleartoship@v0.8.0</div>
+          <div class="badge-code">- uses: actions/checkout@v7</div>
+          <div class="badge-code">- uses: murtazaozdemir/cleartoship@v0.13.10</div>
           <div class="badge-code">  with: { fail-on: critical, comment: true }</div>
         </div>
       </div>
@@ -409,7 +447,7 @@
     <div class="foot-row">
       <div>
         <div class="brand" style="margin-bottom:6px"><span class="glyph">🛡️</span> <b>ClearToShip</b></div>
-        <span class="pill">MIT</span> &nbsp; <span class="pill">v0.8.0</span>
+        <span class="pill">MIT</span> &nbsp; <span class="pill">v0.13.10</span>
       </div>
       <div class="foot-links">
         <a href="/pricing">Pricing</a>
@@ -443,8 +481,8 @@
   // Terminal demo — a real ClearToShip run, revealed line by line.
   var LINES = [
     ['c-dim', '  ▸ framework: Next.js (App Router) + Supabase'],
-    ['c-dim', '  [1/5] dependencies …  [2/5] server actions …  [3/5] RLS …'],
-    ['c-dim', '  [4/5] secrets …  [5/5] known vulnerabilities …'],
+    ['c-dim', '  [1/7] dependencies …  [2/7] server actions …  [3/7] RLS …  [4/7] secrets …'],
+    ['c-dim', '  [5/7] logging & errors …  [6/7] LLM & agent …  [7/7] community rules …'],
     ['', ''],
     ['c-red',  '  ✖ CRITICAL  CTS001  Missing Server Action authorization'],
     ['c-dim',  '              app/actions/delete-workspace.ts:7'],

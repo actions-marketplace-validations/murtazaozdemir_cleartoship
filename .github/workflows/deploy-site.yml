@@ -22,18 +22,24 @@ concurrency:
   group: deploy-site
   cancel-in-progress: false
 
+permissions:
+  contents: read
+
+# The Cloudflare token is deliberately NOT a job-level env var. At job level it
+# would sit in the environment of every step, including `npm ci`, which runs the
+# install scripts of every site dependency. It is handed only to the steps that
+# run wrangler.
 jobs:
   deploy:
     runs-on: ubuntu-latest
     defaults:
       run:
         working-directory: site
-    env:
-      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-node@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 22
           cache: npm
@@ -43,6 +49,9 @@ jobs:
       # Fail here, loudly, rather than at the deploy step with a wall of output.
       # A token missing "Workers Scripts: Edit" is the likely cause.
       - name: Check the Cloudflare token before deploying anything
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
         run: |
           if [ -z "$CLOUDFLARE_API_TOKEN" ] || [ -z "$CLOUDFLARE_ACCOUNT_ID" ]; then
             echo "::error::CLOUDFLARE_API_TOKEN or CLOUDFLARE_ACCOUNT_ID is not set on this repository."
@@ -58,6 +67,9 @@ jobs:
       # indistinguishable from "there is no version" — see the confirm step below.
       - name: Record the live version before deploying
         id: before
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
         run: |
           v=""
           for attempt in 1 2 3; do
@@ -74,12 +86,20 @@ jobs:
       # from this domain, so `curl -fsSL https://cleartoship.app/cleartoship.mjs`
       # works with nothing else in the loop.
       #
-      # Fetched from the GitHub Release at deploy time rather than committed, and
-      # ONLY when a release exists for the exact version this commit declares.
-      # Serving "whatever is latest" would hand out a build that does not match
-      # this source. With no matching release the site simply deploys without the
-      # files, and release.yml redeploys once the release exists.
-      - name: Fetch this version's standalone build into the site
+      # Fetched from the GitHub Release at deploy time rather than committed.
+      # Preferably the release for the exact version this commit declares, so the
+      # download matches the source that deployed it. Between a version bump
+      # landing on main and its tag being released there is no such release —
+      # and deploying then used to publish the site WITHOUT the download, so
+      # `curl https://cleartoship.app/cleartoship.mjs`, the primary install
+      # path, 404'd until release.yml redeployed. Now that window serves the
+      # latest release instead (a real, released build), and release.yml
+      # redeploys with the exact version once it exists.
+      #
+      # Anything newer than 0.13.10 carries a build-provenance attestation, and
+      # it is verified before it is served: this domain must not hand out a
+      # file the Action itself would refuse to run.
+      - name: Fetch the standalone build into the site
         id: dist
         working-directory: .
         env:
@@ -88,15 +108,28 @@ jobs:
           ver=$(node -p "require('./package.json').version")
           tag="v${ver}"
           if gh release view "$tag" >/dev/null 2>&1; then
-            gh release download "$tag" --dir site/public \
-              --pattern cleartoship.mjs --pattern cleartoship-standalone.tgz --clobber
-            (cd site/public && sha256sum cleartoship.mjs cleartoship-standalone.tgz > SHA256SUMS)
-            echo "served=true" >> "$GITHUB_OUTPUT"
             echo "::notice::Serving the ${tag} standalone build from the site."
           else
-            echo "served=false" >> "$GITHUB_OUTPUT"
-            echo "::notice::No release ${tag} yet, so the site deploys without the download files. release.yml redeploys once it exists."
+            tag=$(gh release view --json tagName --jq .tagName)
+            echo "::notice::No release v${ver} yet; serving the latest release, ${tag}, until release.yml redeploys with v${ver}."
           fi
+          gh release download "$tag" --dir site/public \
+            --pattern cleartoship.mjs --pattern cleartoship-standalone.tgz --clobber
+          if node -e 'const [a,b,c]=process.argv[1].replace(/^v/,"").split(/[.-]/).map(Number); process.exit(a*1e6+b*1e3+c <= 13010 ? 1 : 0)' "$tag"; then
+            for f in cleartoship.mjs cleartoship-standalone.tgz; do
+              gh attestation verify "site/public/${f}" \
+                --repo "$GITHUB_REPOSITORY" \
+                --signer-workflow "${GITHUB_REPOSITORY}/.github/workflows/release.yml" \
+                --source-ref "refs/tags/${tag}" \
+                --deny-self-hosted-runners >/dev/null
+            done
+            echo "provenance attestations verified for ${tag}"
+          else
+            echo "::notice::${tag} predates build-provenance attestations; served unverified."
+          fi
+          (cd site/public && sha256sum cleartoship.mjs cleartoship-standalone.tgz > SHA256SUMS)
+          echo "served=true" >> "$GITHUB_OUTPUT"
+          echo "tag=${tag}" >> "$GITHUB_OUTPUT"
 
       - name: Deploy to Cloudflare
         # Pinned to a commit: this step holds the Cloudflare token, and a
@@ -121,6 +154,9 @@ jobs:
       # or still shows the old version, has not yet proved anything either way; keep
       # asking, show what wrangler said, and only fail if it never settles.
       - name: Confirm the live version actually changed
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
         run: |
           before="${{ steps.before.outputs.version }}"
           after=""
