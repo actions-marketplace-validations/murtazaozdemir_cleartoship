@@ -113,8 +113,16 @@ jobs:
             tag=$(gh release view --json tagName --jq .tagName)
             echo "::notice::No release v${ver} yet; serving the latest release, ${tag}, until release.yml redeploys with v${ver}."
           fi
-          gh release download "$tag" --dir site/public \
-            --pattern cleartoship.mjs --pattern cleartoship-standalone.tgz --clobber
+          # By direct URL, not `gh release download`: that reads the release's
+          # embedded asset list, which GitHub served empty for about two minutes
+          # after v0.13.11 went from draft to published, so the redeploy
+          # release.yml dispatches failed with "no assets to download" while the
+          # assets themselves were already there. Retries cover the same lag.
+          for f in cleartoship.mjs cleartoship-standalone.tgz; do
+            curl -fsSL --retry 6 --retry-delay 20 --retry-all-errors \
+              "https://github.com/${GITHUB_REPOSITORY}/releases/download/${tag}/${f}" \
+              -o "site/public/${f}"
+          done
           if node -e 'const [a,b,c]=process.argv[1].replace(/^v/,"").split(/[.-]/).map(Number); process.exit(a*1e6+b*1e3+c <= 13010 ? 1 : 0)' "$tag"; then
             for f in cleartoship.mjs cleartoship-standalone.tgz; do
               gh attestation verify "site/public/${f}" \

@@ -213,7 +213,11 @@ jobs:
           GH_REPO: ${{ github.repository }}
         run: |
           ver="${GITHUB_REF_NAME#v}"
-          have=$(gh release view "${GITHUB_REF_NAME}" --json assets --jq '.assets[].name')
+          # The assets endpoint, not `gh release view`: a release's embedded asset
+          # list read back empty for about two minutes after v0.13.11 was
+          # published, while the assets endpoint and the download URLs had them.
+          id=$(gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${GITHUB_REF_NAME}" --jq .id)
+          have=$(gh api "repos/${GITHUB_REPOSITORY}/releases/${id}/assets" --jq '.[] | select(.state == "uploaded") | .name')
           for asset in "cleartoship-${ver}.tgz" cleartoship-standalone.tgz cleartoship.mjs; do
             echo "$have" | grep -qx "$asset" || {
               echo "::error::release ${GITHUB_REF_NAME} is missing the asset ${asset}"
@@ -221,7 +225,9 @@ jobs:
             }
           done
           rm -f "${RUNNER_TEMP}/released.mjs"
-          gh release download "${GITHUB_REF_NAME}" --pattern cleartoship.mjs --output "${RUNNER_TEMP}/released.mjs"
+          curl -fsSL --retry 6 --retry-delay 20 --retry-all-errors \
+            "https://github.com/${GITHUB_REPOSITORY}/releases/download/${GITHUB_REF_NAME}/cleartoship.mjs" \
+            -o "${RUNNER_TEMP}/released.mjs"
           gh attestation verify "${RUNNER_TEMP}/released.mjs" \
             --repo "${GITHUB_REPOSITORY}" \
             --signer-workflow "${GITHUB_REPOSITORY}/.github/workflows/release.yml" \
