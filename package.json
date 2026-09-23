@@ -58,8 +58,8 @@
     "prepare": "npm run build"
   },
   "dependencies": {
-    "@babel/parser": "^8.0.4",
-    "@babel/traverse": "^8.0.4",
+    "@babel/parser": "^8.0.6",
+    "@babel/traverse": "^8.0.6",
     "@babel/types": "^8.0.4",
     "commander": "^15.0.0",
     "picocolors": "^1.1.0"
