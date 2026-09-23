@@ -1,0 +1,19 @@
+# Response headers for every static asset Cloudflare serves from site/public.
+# (Responses from the Worker script itself — /webhooks/*, /license/* — are
+# JSON and do not pass through this file.)
+#
+# The CSP matches what the pages actually load, read from the HTML:
+#   - scripts: one inline <script> and an inline onclick on index.html, nothing
+#     external, hence 'self' 'unsafe-inline' and no third-party origin;
+#   - styles: one inline <style> block per page, no external stylesheet;
+#   - fonts: none downloaded — the pages use system font stacks only, so
+#     font-src stays at the 'self' default;
+#   - images: the favicon is a data: SVG, hence img-src data:.
+# Anything a page adds later from another origin must be added here first, or
+# the browser will (correctly) refuse it.
+/*
+  Content-Security-Policy: default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'; upgrade-insecure-requests
+  Strict-Transport-Security: max-age=31536000; includeSubDomains
+  X-Content-Type-Options: nosniff
+  Referrer-Policy: no-referrer
+  X-Frame-Options: DENY
