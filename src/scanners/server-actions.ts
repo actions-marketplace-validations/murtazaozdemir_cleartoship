@@ -4,9 +4,10 @@ import {
   traverse, buildModuleIndex, Suppressions, emptyResult,
 } from '../internal.js';
 import {
-  authHelpersFor, isAccessorOnly, isUserLookup, CREDENTIAL_HEADERS, SECRET_ENV, SUPABASE_GET_SESSION,
+  authHelpersFor, isAccessorOnly, isUserLookup, memberPath, resolveWrapper,
+  CREDENTIAL_HEADERS, SECRET_ENV, SUPABASE_GET_SESSION,
 } from './auth-helpers.js';
-import type { ModuleAuth } from './auth-helpers.js';
+import type { ModuleAuth, SessionShape, WrapperOptions, WrapperVerdict } from './auth-helpers.js';
 import { inertNamesFor } from './effects.js';
 import type { Finding, ProjectContext, ScanResult, Scanner } from '../internal.js';
 
@@ -641,25 +642,46 @@ function onlyInvertedGuard(call: any): boolean {
   });
 }
 
-/**
- * Wrapper names that apply auth, beyond the fixed list: `withApiAuthRequired`,
- * `protectedRoute`, `adminAction`. Applied only to a function's wrapper, never to a
- * plain call, and only to decide the wrapped function inherits a check.
+/*
+ * Wrappers — `export default withX(handler)`, `authActionClient.action(fn)` — are judged by
+ * what they do, not what they are called: see resolveWrapper in ./auth-helpers.ts. The old
+ * name test (`/auth|protect|guard|session|.../`) is only the fallback for a wrapper whose
+ * source cannot be read, and a handler credited that way is counted and said out loud.
  */
-const AUTH_WRAPPER_NAME = /auth|protect|guard|session|require|admin|secure|signed|permission|role|apikey|api_key|token/i;
 
-function isAuthWrapper(wrapper: string, credited: ReadonlySet<string>): boolean {
-  if (!wrapper) return false;
-  const root = wrapper.split('.')[0]!;
-  const tail = wrapper.slice(wrapper.lastIndexOf('.') + 1);
-  return (
-    matchesAny(wrapper, AUTH_WRAPPERS) ||
-    AUTH_WRAPPERS.includes(root) ||
-    credited.has(wrapper) ||
-    credited.has(root) ||
-    AUTH_WRAPPER_NAME.test(root) ||
-    AUTH_WRAPPER_NAME.test(tail)
-  );
+/** `!x`, `x == null`, `x === undefined`, `!a || !b`: true when the tested value is missing. */
+function isMissingTest(test: any, isSession: (n: any) => boolean): boolean {
+  if (!test) return false;
+  if (test.type === 'UnaryExpression' && test.operator === '!') return touchesSession(test.argument, isSession);
+  if (test.type === 'BinaryExpression' && (test.operator === '==' || test.operator === '===')) {
+    const nullish = (n: any) => n?.type === 'NullLiteral' || (n?.type === 'Identifier' && n.name === 'undefined');
+    return (nullish(test.right) && touchesSession(test.left, isSession)) || (nullish(test.left) && touchesSession(test.right, isSession));
+  }
+  if (test.type === 'LogicalExpression' && test.operator === '||') {
+    return isMissingTest(test.left, isSession) || isMissingTest(test.right, isSession);
+  }
+  return false;
+}
+
+/** `x`, `x.user`, `!!x`, `x != null`, `a && b`: true when the tested value is present. */
+function isPresentTest(test: any, isSession: (n: any) => boolean): boolean {
+  if (!test) return false;
+  if (isSession(test)) return true;
+  if (test.type === 'UnaryExpression' && test.operator === '!' && test.argument?.type === 'UnaryExpression' && test.argument.operator === '!') {
+    return touchesSession(test.argument.argument, isSession);
+  }
+  if (test.type === 'BinaryExpression' && (test.operator === '!=' || test.operator === '!==')) {
+    const nullish = (n: any) => n?.type === 'NullLiteral' || (n?.type === 'Identifier' && n.name === 'undefined');
+    return (nullish(test.right) && touchesSession(test.left, isSession)) || (nullish(test.left) && touchesSession(test.right, isSession));
+  }
+  if (test.type === 'LogicalExpression' && test.operator === '&&') {
+    return isPresentTest(test.left, isSession) || isPresentTest(test.right, isSession);
+  }
+  return false;
+}
+
+function touchesSession(n: any, isSession: (n: any) => boolean): boolean {
+  return someNode(n, isSession);
 }
 
 /** True when any node in `node` satisfies `pred`, skipping property names and object keys. */
@@ -725,6 +747,8 @@ interface ActionInfo {
   effectCalls: string[];
   /** A signature check that authenticates the caller wherever the route lives. */
   verifiesSignature: boolean;
+  /** Wrappers credited on their name alone — their source was not read. */
+  nameOnlyWrappers: WrapperVerdict[];
 }
 
 function analyseFunction(
@@ -733,9 +757,32 @@ function analyseFunction(
   facts: FileFacts,
   /** Calls this function is handed to from outside its own path: `export default withAuth(handler)`. */
   outerWrappers: string[] = [],
+  /** What a wrapper, spelled as in this file, does for what it wraps. */
+  resolve: (wrapper: string) => WrapperVerdict = (w) => ({ kind: 'none', wrapper: w }),
 ): ActionInfo {
   const { credited, sessionOnly, secretConsts } = facts;
   const node = path.node;
+
+  // The wrappers, first: one that attaches a session decides what counts as an auth
+  // check inside the function, so it has to be known before the body is read.
+  const wrapperNames: string[] = [];
+  {
+    let parent = path.parentPath;
+    let hops = 0;
+    while (parent && hops++ < 4) {
+      if (parent.node?.type === 'CallExpression') wrapperNames.push(calleeName(parent.node.callee));
+      parent = parent.parentPath;
+    }
+    wrapperNames.push(...outerWrappers);
+  }
+  const verdicts = wrapperNames.filter(Boolean).map(resolve);
+  const session: SessionShape = { positions: [], members: [], ctx: false };
+  for (const v of verdicts) {
+    if (v.kind !== 'attaches' || !v.session) continue;
+    session.positions.push(...v.session.positions);
+    session.members.push(...v.session.members);
+    session.ctx ||= v.session.ctx;
+  }
   const info: ActionInfo = {
     name,
     line: node.loc?.start.line ?? 0,
@@ -762,6 +809,7 @@ function analyseFunction(
     aiCalls: 0,
     effectCalls: [],
     verifiesSignature: false,
+    nameOnlyWrappers: [],
   };
 
   // An id the caller passed in is not proof of ownership — it is the IDOR.
@@ -771,6 +819,59 @@ function analyseFunction(
   // or a tRPC procedure it is what the auth middleware resolved, not what the caller sent —
   // `ctx.userId` is the session's id.
   params.delete('ctx');
+
+  // What an attaching wrapper handed in: `handler(req, res, session)` puts it in a
+  // parameter, iron-session on `req.session`, next-auth v5 on `req.auth`, a safe-action
+  // client in `ctx`. Server-resolved, so not caller input, and a guard on it is an auth check.
+  const sessionNames = new Set<string>();
+  const sessionPaths: string[] = [];
+  {
+    const ps: any[] = node.params ?? [];
+    for (const i of session.positions) if (ps[i]) for (const n of parameterNames([ps[i]])) sessionNames.add(n);
+    for (const m of session.members) {
+      for (const p of ps) {
+        if (p?.type === 'Identifier') sessionPaths.push(`${p.name}.${m}`);
+        // `withIronSessionSsr(async ({ req }) => ...)`
+        if (p?.type === 'ObjectPattern') {
+          for (const prop of p.properties ?? []) {
+            if (prop.type === 'ObjectProperty' && prop.value?.type === 'Identifier') sessionPaths.push(`${prop.value.name}.${m}`);
+          }
+        }
+      }
+    }
+    if (session.ctx) {
+      sessionNames.add('ctx');
+      for (const p of ps) {
+        if (p?.type !== 'ObjectPattern') continue;
+        for (const prop of p.properties ?? []) {
+          if (prop.type === 'ObjectProperty' && propertyKey(prop) === 'ctx') {
+            for (const n of parameterNames([prop.value])) sessionNames.add(n);
+          }
+        }
+      }
+    }
+    for (const n of sessionNames) params.delete(n);
+  }
+  const sessionDerived = new Set<string>();
+  const isSessionExpr = (n: any): boolean => {
+    if (n.type === 'Identifier') return sessionNames.has(n.name) || sessionDerived.has(n.name);
+    if (n.type === 'MemberExpression' || n.type === 'OptionalMemberExpression') {
+      const p = memberPath(n);
+      return p !== '' && sessionPaths.some((sp) => p === sp || p.startsWith(sp + '.'));
+    }
+    return false;
+  };
+  if (sessionNames.size > 0 || sessionPaths.length > 0) {
+    for (let pass = 0; pass < 2; pass++) {
+      path.traverse({
+        VariableDeclarator(inner: any) {
+          if (inner.node.init && someNode(inner.node.init, isSessionExpr)) {
+            for (const n of parameterNames([inner.node.id])) sessionDerived.add(n);
+          }
+        },
+      });
+    }
+  }
 
   /**
    * Names holding the caller's payload as one object: a Server Action's own
@@ -1092,7 +1193,8 @@ function analyseFunction(
       // `body.userId` after `const body = await req.json()` is the caller naming an id;
       // only a principal the function resolved itself scopes the write.
       const root = rootObject(inner.node);
-      if (!root || (!params.has(root) && !isCallerName(root))) {
+      // `req.session.user.id` under iron-session: the request's root, but a server-resolved value.
+      if (!root || (!params.has(root) && !isCallerName(root)) || isSessionExpr(inner.node)) {
         for (const hint of OWNER_HINTS) {
           if (full === hint || full.endsWith('.' + hint)) info.ownerScoped = true;
         }
@@ -1104,7 +1206,8 @@ function analyseFunction(
       const prop = inner.node;
       if (prop.computed || prop.shorthand || !OWNER_IDENTIFIERS.has(propertyKey(prop))) return;
       if (prop.value?.type === 'StringLiteral' || prop.value?.type === 'NumericLiteral') return;
-      if (mentions(prop.value, (id) => params.has(id) || isCallerName(id)) || readsCaller(prop.value)) return;
+      const fromSession = someNode(prop.value, isSessionExpr);
+      if (!fromSession && (mentions(prop.value, (id) => params.has(id) || isCallerName(id)) || readsCaller(prop.value))) return;
       info.ownerScoped = true;
     },
     Identifier(inner: any) {
@@ -1140,12 +1243,27 @@ function analyseFunction(
   // is an auth check like any other, and is placed like one: a guard after the write
   // turns the caller away once the row is already changed.
   const guardEvents: any[] = [];
+  /** `if (session) { ...write... }` on a wrapper-provided session: the writes inside it. */
+  const presentGuards: any[] = [];
+  const hasSession = sessionNames.size > 0 || sessionPaths.length > 0;
   path.traverse({
     IfStatement(inner: any) {
-      if (!touchesCredential(inner.node.test)) return;
-      if (someNode(inner.node.consequent, isUnauthorisedExit)) guardEvents.push(inner);
+      const test = inner.node.test;
+      if (touchesCredential(test) && someNode(inner.node.consequent, isUnauthorisedExit)) {
+        guardEvents.push(inner);
+        return;
+      }
+      if (!hasSession) return;
+      // `if (!req.session.user) return res.status(401)...`, `if (!ctx.user) throw ...`
+      if (isMissingTest(test, isSessionExpr) && (exits(inner.node.consequent) || someNode(inner.node.consequent, isUnauthorisedExit))) {
+        guardEvents.push(inner);
+      } else if (isPresentTest(test, isSessionExpr)) {
+        presentGuards.push(inner);
+      }
     },
   });
+  const insidePresentGuard = (m: any) =>
+    presentGuards.some((g) => !skippedInProduction(g, path) && m.findParent((q: any) => q.node === g.node.consequent));
 
   /**
    * Whether a check at `ev` protects the write at `m`: it runs, in production, before it.
@@ -1158,34 +1276,31 @@ function analyseFunction(
     const at = runPosition(ev, scope);
     return at !== NEVER_RUNS && at <= runPosition(m, scope);
   };
-  const valid = (ev: any, isCall: boolean) =>
-    !skippedInProduction(ev, path) && !(isCall && onlyInvertedGuard(ev));
+  const live = authEvents.filter((ev) => !skippedInProduction(ev, path));
+  const inverted = live.filter((ev) => onlyInvertedGuard(ev));
   const events = [
-    ...authEvents.filter((ev) => valid(ev, true)),
-    ...guardEvents.filter((ev) => valid(ev, false)),
+    ...live.filter((ev) => !inverted.includes(ev)),
+    ...guardEvents.filter((ev) => !skippedInProduction(ev, path)),
   ];
   info.hasAuth =
-    events.length > 0 &&
+    (events.length > 0 || presentGuards.length > 0) &&
     (mutationPaths.length === 0
-      ? events.some((ev) => guards(ev, null))
-      : mutationPaths.every((m) => events.some((ev) => guards(ev, m))));
+      ? events.some((ev) => guards(ev, null)) || presentGuards.length > 0
+      : mutationPaths.every((m) => insidePresentGuard(m) || events.some((ev) => guards(ev, m))));
 
-  // An action wrapped by an auth HOC inherits the check from its wrapper.
-  const wrappedBy = (wrapper: string, tail: string) => {
-    if (isAuthWrapper(wrapper, credited)) info.hasAuth = true;
+  // An action wrapped by an auth HOC inherits the check from its wrapper — when the
+  // wrapper provably requires one, or (the fallback) when all that is known is its name.
+  verdicts.forEach((v, i) => {
+    const wrapper = wrapperNames[i]!;
+    if (v.kind === 'requires') info.hasAuth = true;
+    if (v.kind === 'name-only') {
+      if (!info.hasAuth) info.nameOnlyWrappers.push(v);
+      info.hasAuth = true;
+    }
     // `verifySignatureAppRouter(async (req) => ...)` (Upstash QStash) and the like.
     if (STRONG_SIGNATURE_NAME.test(wrapper)) info.verifiesSignature = true;
-    if (VALIDATION_CALLS.has(tail)) info.hasValidation = true;
-  };
-  let parent = path.parentPath;
-  let hops = 0;
-  while (parent && hops++ < 4) {
-    if (parent.node?.type === 'CallExpression') {
-      wrappedBy(calleeName(parent.node.callee), calleeTail(parent.node.callee));
-    }
-    parent = parent.parentPath;
-  }
-  for (const w of outerWrappers) wrappedBy(w, w.slice(w.lastIndexOf('.') + 1));
+    if (VALIDATION_CALLS.has(wrapper.slice(wrapper.lastIndexOf('.') + 1))) info.hasValidation = true;
+  });
 
   return info;
 }
@@ -1265,6 +1380,17 @@ export const serverActionsScanner: Scanner = {
       cache: new Map<string, ReadonlySet<string>>(),
     };
 
+    const wrapperOptions: WrapperOptions = {
+      ...helperOptions,
+      isCredentialSource,
+      isUnauthorisedExit,
+      exits,
+      wrapperCache: new Map(),
+      astCache: new Map(),
+    };
+    /** Handlers credited to a wrapper by its name alone, by wrapper (and package). */
+    const nameOnly = new Map<string, string[]>();
+
     for (const file of ctx.files) {
       if (!isScript(file)) continue;
       const source = read(file);
@@ -1337,7 +1463,11 @@ export const serverActionsScanner: Scanner = {
         if (!isAction && !isRoute) return;
         analysed.add(node);
 
-        const info = analyseFunction(path, name, facts, wrappers);
+        const info = analyseFunction(path, name, facts, wrappers, (w) => resolveWrapper(w, file, ast, wrapperOptions));
+        for (const v of info.nameOnlyWrappers) {
+          const key = v.from ? `\`${v.wrapper}\` from \`${v.from}\`` : `\`${v.wrapper}\``;
+          nameOnly.set(key, [...(nameOnly.get(key) ?? []), `${relPath}:${name}`]);
+        }
         if (isAction) actionCount++;
         if (isRoute) routeCount++;
 
@@ -1734,16 +1864,33 @@ export const serverActionsScanner: Scanner = {
       });
     }
 
+    // A wrapper credited on its name alone is a guess, not a verified check. Not a finding —
+    // most are fine, and a finding per handler would bury the real ones — but the scan
+    // must not present it as verified either, so it is said, with the handlers it covers.
+    let nameOnlyCount = 0;
+    for (const [wrapper, handlers] of nameOnly) {
+      nameOnlyCount += handlers.length;
+      result.warnings.push(
+        `${handlers.length} Server Action / Route Handler${handlers.length === 1 ? ' was' : 's were'} counted as ` +
+          `authenticated because ${wrapper} is named like an auth wrapper; its source was not read, so that is ` +
+          `unverified (${handlers.slice(0, 3).join(', ')}${handlers.length > 3 ? ', …' : ''})`,
+      );
+    }
+    const nameOnlyNote = nameOnlyCount
+      ? `${nameOnlyCount} credited to a wrapper by name only, unverified`
+      : undefined;
     if (actionCount > 0) {
       result.checks.push({
         label: `Server Action authorization (${actionCount} action${actionCount === 1 ? '' : 's'} analysed)`,
         passed: !result.findings.some((f) => f.id === 'CTS001' || f.id === 'CTS003'),
+        ...(nameOnlyNote ? { note: nameOnlyNote } : {}),
       });
     }
     if (routeCount > 0) {
       result.checks.push({
         label: `Route Handler authorization (${routeCount} handler${routeCount === 1 ? '' : 's'} analysed)`,
         passed: !result.findings.some((f) => f.id === 'CTS001' && f.meta?.kind === 'Route Handler'),
+        ...(nameOnlyNote ? { note: nameOnlyNote } : {}),
       });
     }
     if (actionCount === 0 && routeCount === 0) {
