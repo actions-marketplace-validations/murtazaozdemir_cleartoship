@@ -94,7 +94,8 @@ function buildDialectModel(ctx: ProjectContext): DialectModel {
     // SQLite output (`"id" TEXT NOT NULL PRIMARY KEY`, `DATETIME`) carries no
     // SQLite-only syntax, so without this a Prisma-on-SQLite app read as a
     // Supabase table with RLS off on every model.
-    const lock = read(join(dir, 'migration_lock.toml'));
+    const lockPath = join(dir, 'migration_lock.toml');
+    const lock = existsSync(lockPath) ? read(lockPath) : null;
     const provider = lock === null ? undefined : /^\s*provider\s*=\s*"([^"]+)"/m.exec(lock)?.[1];
     if (provider && !/^(postgres(ql)?|cockroachdb)$/i.test(provider)) prismaOtherDirs.add(dir);
     for (const name of WRANGLER_CONFIGS) {
@@ -363,8 +364,8 @@ function roleComparison(op: string, role: string): string {
 const ROLE_SOURCE =
   String.raw`(?:\(\s*)?(?:select\s+)?(?:auth\s*\.\s*role\s*\(\s*\)` +
   String.raw`|\(?\s*auth\s*\.\s*jwt\s*\(\s*\)\s*\)?\s*->>\s*'role'` +
-  String.raw`|current_setting\s*\(\s*'request\.jwt\.claim\.role'[^)]*\)` +
-  String.raw`|current_setting\s*\(\s*'request\.jwt\.claims'[^)]*\)\s*(?:::\s*jsonb?\s*)?->>\s*'role'` +
+  String.raw`|current_setting\s*\(\s*'request\.jwt\.claim\.role'[^)]{0,40}\)` +
+  String.raw`|current_setting\s*\(\s*'request\.jwt\.claims'[^)]{0,40}\)\s*(?:::\s*jsonb?\s*)?->>\s*'role'` +
   String.raw`|current_user)(?:\s*\))?(?:\s*::\s*text)?`;
 
 function markGates(expr: string): string {
@@ -379,47 +380,55 @@ function markGates(expr: string): string {
 }
 
 interface CallerFunctions {
-  /** Bare, lower-cased names of functions whose body identifies the caller. */
-  isolating: Set<string>;
-  /** Bare names of functions whose body only checks that the caller is signed in. */
-  gate: Set<string>;
+  /** Matches a call to a function whose body identifies the caller (null: none). */
+  isolating: RegExp | null;
+  /** Matches a call to a function whose body only checks that the caller is signed in. */
+  gate: RegExp | null;
+  /** Predicate text → classification, once the function sets are final. */
+  memo?: Map<string, Isolation>;
 }
 
-function callsAny(expr: string, names: Set<string>): boolean {
-  for (const name of names) {
-    const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    if (new RegExp(`(?:^|[^\\w$])"?${escaped}"?\\s*\\(`, 'i').test(expr)) return true;
-  }
-  return false;
+function callPattern(names: Set<string>): RegExp | null {
+  if (names.size === 0) return null;
+  const alternation = [...names].map((n) => n.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|');
+  return new RegExp(`(?:^|[^\\w$])"?(?:${alternation})"?\\s*\\(`, 'i');
 }
 
 type Isolation = 'isolating' | 'gate' | 'other';
 
 function classify(expr: string, fns: CallerFunctions): Isolation {
+  const cached = fns.memo?.get(expr);
+  if (cached) return cached;
   const marked = markGates(expr);
-  if (CALLER_REF.test(marked) || callsAny(marked, fns.isolating)) return 'isolating';
-  if (marked.includes(GATE) || callsAny(marked, fns.gate)) return 'gate';
-  return 'other';
+  const kind: Isolation =
+    CALLER_REF.test(marked) || fns.isolating?.test(marked) ? 'isolating'
+      : marked.includes(GATE) || fns.gate?.test(marked) ? 'gate'
+        : 'other';
+  fns.memo?.set(expr, kind);
+  return kind;
 }
 
 /** Classifies every function body; a helper that calls an isolating helper isolates too. */
 function classifyFunctions(bodies: Map<string, string>): CallerFunctions {
-  const fns: CallerFunctions = { isolating: new Set(), gate: new Set() };
+  const isolating = new Set<string>();
+  const gate = new Set<string>();
   for (let changed = true; changed;) {
     changed = false;
+    const fns: CallerFunctions = { isolating: callPattern(isolating), gate: callPattern(gate) };
     for (const [name, body] of bodies) {
+      if (isolating.has(name)) continue;
       const kind = classify(body, fns);
-      if (kind === 'isolating' && !fns.isolating.has(name)) {
-        fns.isolating.add(name);
-        fns.gate.delete(name);
+      if (kind === 'isolating') {
+        isolating.add(name);
+        gate.delete(name);
         changed = true;
-      } else if (kind === 'gate' && !fns.gate.has(name) && !fns.isolating.has(name)) {
-        fns.gate.add(name);
+      } else if (kind === 'gate' && !gate.has(name)) {
+        gate.add(name);
         changed = true;
       }
     }
   }
-  return fns;
+  return { isolating: callPattern(isolating), gate: callPattern(gate), memo: new Map() };
 }
 
 const COMMANDS = ['SELECT', 'INSERT', 'UPDATE', 'DELETE'] as const;
