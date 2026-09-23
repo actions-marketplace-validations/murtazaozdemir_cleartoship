@@ -56,8 +56,18 @@ export function normaliseOwasp(raw: string | undefined): string | null {
   if (!raw) return null;
   // The API Security Top 10 is a different list with its own numbering, and a
   // few rules cite it — sometimes without the `API` prefix, as `A04:2023`.
-  // Anything from the 2023 list is left as it is rather than flattened into a
-  // web category nobody published a mapping for.
+  // Anything from the 2023 list is kept on that list rather than flattened into
+  // a web category nobody published a mapping for. But it is not left as it
+  // came: eight vendored rules label themselves `A04:2023 Unrestricted Resource
+  // Consumption`, which printed beside `A04:2025 - Cryptographic Failures` reads
+  // as the same A04. The API list numbers its categories `API1`…`API10`, so the
+  // prefix is restored — the category is unchanged, and the upstream text is
+  // still kept in `meta.owaspUpstream`.
+  const apiWithoutPrefix = /^\s*A(\d{1,2}):2023\b\s*(?:-\s*)?(.*)$/.exec(raw);
+  if (apiWithoutPrefix) {
+    const label = apiWithoutPrefix[2]!.trim();
+    return `API${Number(apiWithoutPrefix[1])}:2023${label ? ` ${label}` : ''}`;
+  }
   if (/^API\d/i.test(raw.trim()) || /:2023\b/.test(raw)) return null;
   for (const [pattern, canonical] of NORMALISE) {
     if (pattern.test(raw)) return canonical;

@@ -1,5 +1,6 @@
-import { basename } from 'node:path';
-import { read, rel, lineAt, snippetAt, exists, isScript, languagesFor } from '../utils/files.js';
+import { basename, sep } from 'node:path';
+import { read, rel, exists, isScript, languagesFor } from '../utils/files.js';
+import { LineIndex, clip } from '../utils/line-index.js';
 import { commentStyleFor, lexSpans, isInside } from '../utils/spans.js';
 import { rulesForPath } from '../utils/gitignore.js';
 import { Suppressions } from '../utils/suppress.js';
@@ -7,7 +8,7 @@ import { promote } from '../utils/paths.js';
 import { emptyResult } from '../types.js';
 import type { Finding, ProjectContext, ScanResult, Scanner, Severity } from '../types.js';
 import { join } from 'node:path';
-import { shannonEntropy } from '../utils/entropy.js';
+import { shannonEntropy, redactCredential } from '../utils/entropy.js';
 import {
   GITLEAKS_RULES, GITLEAKS_STOPWORDS, GITLEAKS_ATTRIBUTION,
 } from '../vendor/gitleaks/rules.js';
@@ -221,28 +222,113 @@ function aiProviderIn(varName: string): string | null {
  */
 const MAX_HITS_PER_RULE = 3;
 
+/**
+ * Regex matches examined per pattern, per file — reported or discarded. A
+ * file that is one credential-shaped token repeated ninety thousand times is
+ * not ninety thousand things to check, and examining every one is how a
+ * scanner gets held up by the file it is reading. Past this, the file is named
+ * in the check note and the run is marked incomplete: the matches that were
+ * not examined were not checked, and saying nothing would read as clean.
+ */
+const MAX_MATCHES_EXAMINED = 200;
+
+/** A read of the environment, or a type or keyword: code, not a value to hide. */
+const NOT_A_VALUE = /^(?:process\.env|import\.meta\.env|os\.environ|Deno\.env|env\.)|^[a-z]+$/;
+
+/**
+ * A line with every credential-shaped value on it redacted, for a snippet.
+ *
+ * CTS030 and the gitleaks rules redact the value they matched; the rules that
+ * report a *variable* (CTS031, CTS033, CTS040, CTS045) printed the line as it
+ * was, so a `.env` line giving an OpenAI key to a `NEXT_PUBLIC_` variable put
+ * the whole key in the report of the rule that exists to say the key is
+ * exposed. The value assigned to a secret-named variable and anything a
+ * built-in pattern recognises are both replaced, then the line is clipped — in
+ * that order, or a long key cut off mid-way would escape the replacement.
+ */
+function redactedSnippet(lineText: string): string {
+  let text = lineText;
+  for (const pattern of PATTERNS) {
+    // Every PATTERNS regex is global, and `replace` starts a global regex from 0.
+    text = text.replace(pattern.re, (m) => redactCredential(m));
+  }
+  text = text.replace(
+    /([A-Za-z_][A-Za-z0-9_]*)(\s*[=:]\s*)(["'`]?)([^\s"'`,;]{7,})/g,
+    (whole, name: string, sep: string, quote: string, value: string) =>
+      SECRETY_NAME.test(name.toUpperCase()) && !value.includes('…') && !NOT_A_VALUE.test(value)
+        ? `${name}${sep}${quote}${redactCredential(value)}`
+        : whole,
+  );
+  return clip(text.trim());
+}
+
 const LOCKFILES = new Set([
   'package-lock.json', 'pnpm-lock.yaml', 'yarn.lock', 'bun.lock', 'bun.lockb',
   'poetry.lock', 'Pipfile.lock', 'composer.lock',
 ]);
 
 /**
+ * Line-comment openers for one file, by its language.
+ *
+ * This used to be one list for every file — `#`, `//`, `*` and `--` — so a
+ * Markdown bullet (`* OPENAI_API_KEY=sk-proj-…` in a SETUP.md) and a shell
+ * continuation line (`  --api-key sk_live_…` in a deploy.sh) both read as
+ * comments, and two live keys were dropped as "documented examples". `*` only
+ * continues a comment in a language with `/* … *\/` blocks, and `--` only opens
+ * one in SQL. Files with no language of their own (`.env`, `.toml`, Markdown,
+ * a Makefile) keep the two openers that mean "comment" nearly everywhere.
+ */
+function commentOpenersFor(file: string): RegExp {
+  const languages = languagesFor(file);
+  const style = commentStyleFor(languages);
+  const openers = new Set<string>();
+  const slashes = ['\\/\\/', '\\/\\*'];
+  if (style.slashes) [...slashes, '\\*'].forEach((o) => openers.add(o));
+  if (style.hash) openers.add('#');
+  if (style.dashes) openers.add('--');
+  // HCL takes `//` and `/* */` as well as `#`; JSON-with-comments takes `//`.
+  if (languages.includes('terraform') || languages.includes('json')) {
+    slashes.forEach((o) => openers.add(o));
+  }
+  if (languages.length === 0) ['#', ...slashes].forEach((o) => openers.add(o));
+  return new RegExp(`^(?:${[...openers].join('|')})`);
+}
+
+/** Inside a string literal, the text is prose in some other file's syntax. */
+const EMBEDDED_COMMENT = /^(?:#|\/\/)/;
+
+/**
  * True when the match sits on a commented-out line. Splits on real newlines and
  * on the two-character `\n` escape as well, because docs-in-a-string-literal
  * (`"# .env — WRONG\n# NEXT_PUBLIC_SECRET=..."`) are a common way to show the
  * wrong way to do something, and flagging those is noise.
+ *
+ * Only the match's own line is read. This used to take `source.slice(0, index)`
+ * for every match, which made the scanner quadratic in the size of the file.
  */
-function isCommentedOut(source: string, index: number): boolean {
-  const before = source.slice(0, index);
-  const start = Math.max(
-    before.lastIndexOf('\n'),
-    before.lastIndexOf('\\n') + 1,
-    before.lastIndexOf('"'),
-    before.lastIndexOf("'"),
-    before.lastIndexOf('`'),
-  );
+function isCommentedOut(
+  source: string,
+  index: number,
+  lineStart: number,
+  openers: RegExp,
+): boolean {
+  const before = source.slice(lineStart, index);
+  let start = -1;
+  let embedded = false;
+  const escaped = before.lastIndexOf('\\n');
+  if (escaped !== -1) {
+    start = escaped + 1;
+    embedded = true;
+  }
+  for (const quote of ['"', "'", '`']) {
+    const at = before.lastIndexOf(quote);
+    if (at > start) {
+      start = at;
+      embedded = true;
+    }
+  }
   const segment = before.slice(start + 1).trimStart();
-  return /^(#|\/\/|\*|--)/.test(segment);
+  return (embedded ? EMBEDDED_COMMENT : openers).test(segment);
 }
 
 /**
@@ -250,8 +336,7 @@ function isCommentedOut(source: string, index: number): boolean {
  * tooling, docs and rule libraries quote the very patterns we search for, and
  * a quoted mention is prose, not configuration.
  */
-function isQuoted(source: string, index: number): boolean {
-  const lineStart = source.lastIndexOf('\n', index - 1) + 1;
+function isQuoted(source: string, index: number, lineStart: number): boolean {
   const before = source.slice(lineStart, index);
   for (const quote of ['"', "'", '`']) {
     let count = 0;
@@ -259,6 +344,27 @@ function isQuoted(source: string, index: number): boolean {
       if (before[i] === quote && before[i - 1] !== '\\') count++;
     }
     if (count % 2 === 1) return true;
+  }
+  return false;
+}
+
+/**
+ * Whether git would leave this file out of `git add .` — by a rule matching
+ * the file, or by a rule excluding any directory above it. Git never descends
+ * into an excluded directory, so nothing inside one can be added, whatever the
+ * file's own name. Asking only about the file reported `config/secrets/.env`
+ * as uncovered in a repository whose .gitignore lists `config/secrets/` — seen
+ * under --no-gitignore, which walks into ignored directories on purpose.
+ */
+function gitWouldIgnore(root: string, abs: string): boolean {
+  if (rulesForPath(root, abs, read).ignores(abs, false)) return true;
+  const base = root.replace(/[/\\]+$/, '');
+  if (!abs.startsWith(base + sep)) return false;
+  const segments = abs.slice(base.length + 1).split(sep).slice(0, -1);
+  let dir = base;
+  for (const segment of segments) {
+    dir = join(dir, segment);
+    if (rulesForPath(root, dir, read).ignores(dir, true)) return true;
   }
   return false;
 }
@@ -278,42 +384,61 @@ export const secretsScanner: Scanner = {
     // unsaid, this is a report that quietly stops counting: twenty leaked keys
     // in one file read as three.
     const truncated = new Set<string>();
+    // Files where a pattern matched more often than MAX_MATCHES_EXAMINED, so
+    // the remainder of that pattern's matches went unexamined.
+    const overmatched = new Set<string>();
 
     for (const file of ctx.files) {
       const name = basename(file);
       if (LOCKFILES.has(name)) continue;
+      const relPath = rel(ctx.root, file);
+      // One file that throws — a pathological input, a bug in a helper — must
+      // cost that file, not every file after it. Unguarded, the whole scanner
+      // failed and every secret in the repository went unreported.
+      try {
       const source = read(file);
       if (source === null) continue;
-      const relPath = rel(ctx.root, file);
       const isExample = /\.(example|sample|template)$/.test(relPath) || /\.env\.example/.test(relPath);
       const fixtureFile = NON_PRODUCTION_PATH.test(relPath);
       filesScanned++;
       const suppress = new Suppressions(source);
       const clientComponent = /^\s*(['"])use client\1/m.test(source.slice(0, 400));
+      const lines = new LineIndex(source);
+      const openers = commentOpenersFor(file);
+      const commented = (index: number, line: number) =>
+        isCommentedOut(source, index, lines.lineStart(line), openers);
+      /** Counts one examined match; false once the pattern has used its allowance. */
+      const examine = (counter: { n: number }): boolean => {
+        if (++counter.n <= MAX_MATCHES_EXAMINED) return true;
+        overmatched.add(relPath);
+        return false;
+      };
 
       for (const pattern of PATTERNS) {
+        if (pattern.id === 'supabase-anon') continue; // informational only, not reported
         pattern.re.lastIndex = 0;
         let m: RegExpExecArray | null;
+        const examined = { n: 0 };
         while ((m = pattern.re.exec(source)) !== null) {
           const value = m[0];
+          const line = lines.lineAt(m.index);
+          const key = `${relPath}:${line}:${pattern.id}`;
+          // Already reported on this line: nothing left to decide, and cheap to skip.
+          if (seen.has(key)) continue;
+          if (!examine(examined)) break;
           if (pattern.confirm && !pattern.confirm(value)) continue;
           if (isPlaceholder(value)) continue;
-          if (pattern.id === 'supabase-anon') continue; // informational only, not reported
-          const line = lineAt(source, m.index);
-          if (isCommentedOut(source, m.index)) continue; // documented example, not a live secret
+          if (commented(m.index, line)) continue; // documented example, not a live secret
           if (suppress.suppressed(line, 'CTS030')) continue;
 
-          const key = `${relPath}:${line}:${pattern.id}`;
-          if (seen.has(key)) continue;
           seen.add(key);
           seen.add(`${relPath}:${line}:builtin`);
 
-          const redacted = value.length > 14 ? `${value.slice(0, 8)}…${value.slice(-4)}` : value;
+          const redacted = redactCredential(value);
           // Redact first, then truncate: a long key would otherwise be cut off
           // before the replacement could match, leaving the secret on screen.
-          const rawLine = source.split('\n')[line - 1] ?? '';
-          const safeLine = rawLine.split(value).join(redacted).trim();
-          const snippet = safeLine.length > 160 ? safeLine.slice(0, 157) + '...' : safeLine;
+          const rawLine = lines.lineText(line);
+          const snippet = clip(rawLine.split(value).join(redacted).trim());
           // A client component compiles into the bundle every visitor
           // downloads, so the same value is worse there than on the server.
           // This used to read `clientComponent && pattern.severity === 'critical'
@@ -377,31 +502,30 @@ export const secretsScanner: Scanner = {
         rule.pattern.lastIndex = 0;
         let g: RegExpExecArray | null;
         let hits = 0;
+        const examined = { n: 0 };
         while ((g = rule.pattern.exec(source)) !== null) {
           if (g[0].length === 0) {
             rule.pattern.lastIndex++;
             continue;
           }
           const secret = g[1] ?? g[0];
-          const line = lineAt(source, g.index);
+          const line = lines.lineAt(g.index);
+          const findingId = `GL-${rule.id}`;
+          const key = `${relPath}:${line}:${findingId}`;
+          // A hand-written pattern already claimed this location.
+          if (seen.has(`${relPath}:${line}:builtin`) || seen.has(key)) continue;
+          if (!examine(examined)) break;
 
           if (HEX_DIGEST.test(secret)) continue;
           if (rule.entropy !== null && shannonEntropy(secret) < rule.entropy) continue;
           if (isPlaceholder(secret)) continue;
           if (GITLEAKS_STOPWORDS.some((w) => secret.toLowerCase().includes(w))) continue;
-          if (isCommentedOut(source, g.index)) continue;
-          // A hand-written pattern already claimed this location.
-          if (seen.has(`${relPath}:${line}:builtin`)) continue;
-
-          const findingId = `GL-${rule.id}`;
-          const key = `${relPath}:${line}:${findingId}`;
-          if (seen.has(key) || suppress.suppressed(line, findingId)) continue;
+          if (commented(g.index, line)) continue;
+          if (suppress.suppressed(line, findingId)) continue;
           seen.add(key);
 
-          const redacted =
-            secret.length > 14 ? `${secret.slice(0, 6)}\u2026${secret.slice(-4)}` : secret;
-          const rawLine = source.split('\n')[line - 1] ?? '';
-          const safeLine = rawLine.split(secret).join(redacted).trim();
+          const redacted = redactCredential(secret);
+          const safeLine = lines.lineText(line).split(secret).join(redacted).trim();
 
           result.findings.push({
             id: findingId,
@@ -423,7 +547,7 @@ export const secretsScanner: Scanner = {
               'environment variable read only on the server, and purge it from git history.',
             file: relPath,
             line,
-            snippet: safeLine.length > 160 ? safeLine.slice(0, 157) + '...' : safeLine,
+            snippet: clip(safeLine),
             cwe: 'CWE-798: Use of Hard-coded Credentials',
             owasp: 'A04:2025 - Cryptographic Failures',
             meta: {
@@ -450,11 +574,11 @@ export const secretsScanner: Scanner = {
         const varName = e[1] ?? e[2]!;
         if (PUBLIC_BY_DESIGN.test(varName)) continue;
         if (!SECRETY_NAME.test(varName)) continue;
-        const line = lineAt(source, e.index);
-        if (isCommentedOut(source, e.index)) continue; // a documented counter-example
-        if (suppress.suppressed(line, 'CTS031')) continue;
         const key = `${relPath}:${varName}`;
         if (seen.has(key)) continue;
+        const line = lines.lineAt(e.index);
+        if (commented(e.index, line)) continue; // a documented counter-example
+        if (suppress.suppressed(line, 'CTS031')) continue;
         seen.add(key);
         const provider = aiProviderIn(varName);
         result.findings.push({
@@ -475,9 +599,13 @@ export const secretsScanner: Scanner = {
             'Actions, Route Handlers, server components), and rotate the current value.',
           file: relPath,
           line,
-          snippet: snippetAt(source, line),
+          // The line usually carries the value itself (`NEXT_PUBLIC_…_KEY=sk-…`
+          // in a .env), and this finding is the one saying that value is exposed.
+          snippet: redactedSnippet(lines.lineText(line)),
           cwe: 'CWE-200: Exposure of Sensitive Information to an Unauthorized Actor',
-          owasp: 'A04:2025 - Cryptographic Failures',
+          // OWASP 2025 files CWE-200 under Broken Access Control, and CTS013 and
+          // CTS019 already said so; this said Cryptographic Failures.
+          owasp: 'A01:2025 - Broken Access Control',
           meta: { variable: varName },
         });
       }
@@ -494,10 +622,12 @@ export const secretsScanner: Scanner = {
           if (varName === 'NODE_ENV' || varName === 'VERCEL_ENV' || varName === 'NODE_OPTIONS') continue;
           if (SECRETY_NAME.test(varName)) continue; // covered at critical by CTS033
           if (reported.has(varName)) continue;
-          reported.add(varName);
-          const line = lineAt(source, g.index);
-          if (isCommentedOut(source, g.index)) continue;
+          const line = lines.lineAt(g.index);
+          // Marked reported only once it is: a commented-out mention first in
+          // the file used to hide every real read of the same variable below it.
+          if (commented(g.index, line)) continue;
           if (suppress.suppressed(line, 'CTS040')) continue;
+          reported.add(varName);
           result.findings.push({
             id: 'CTS040',
             severity: fixtureFile ? 'low' : 'high',
@@ -512,7 +642,7 @@ export const secretsScanner: Scanner = {
               'result down as a prop. Add the `NEXT_PUBLIC_` prefix only if the value is genuinely public.',
             file: relPath,
             line,
-            snippet: snippetAt(source, line),
+            snippet: redactedSnippet(lines.lineText(line)),
             cwe: 'CWE-668: Exposure of Resource to Wrong Sphere',
             owasp: 'A04:2025 - Cryptographic Failures',
             meta: { variable: varName },
@@ -523,12 +653,13 @@ export const secretsScanner: Scanner = {
       // An AI SDK client told to run in the browser ships the API key with it.
       if (isScript(file)) {
         const browserFlag = /dangerouslyAllowBrowser\s*:\s*true/.exec(source);
+        const flagLine = browserFlag ? lines.lineAt(browserFlag.index) : 0;
         if (
           browserFlag &&
-          !isCommentedOut(source, browserFlag.index) &&
-          !isQuoted(source, browserFlag.index)
+          !commented(browserFlag.index, flagLine) &&
+          !isQuoted(source, browserFlag.index, lines.lineStart(flagLine))
         ) {
-          const line = lineAt(source, browserFlag.index);
+          const line = flagLine;
           if (!suppress.suppressed(line, 'CTS045')) {
             result.findings.push({
               id: 'CTS045',
@@ -543,7 +674,9 @@ export const secretsScanner: Scanner = {
                 'instead. If you need streaming, proxy the stream through your own endpoint.',
               file: relPath,
               line,
-              snippet: snippetAt(source, line),
+              // `new OpenAI({ apiKey: 'sk-…', dangerouslyAllowBrowser: true })`
+              // is one line more often than not.
+              snippet: redactedSnippet(lines.lineText(line)),
               cwe: 'CWE-522: Insufficiently Protected Credentials',
               owasp: 'A04:2025 - Cryptographic Failures',
               meta: { flag: 'dangerouslyAllowBrowser' },
@@ -574,7 +707,7 @@ export const secretsScanner: Scanner = {
           break;
         }
         if (hit) {
-          const line = lineAt(source, hit.index);
+          const line = lines.lineAt(hit.index);
           if (!suppress.suppressed(line, 'CTS033')) {
             result.findings.push({
               id: 'CTS033',
@@ -589,12 +722,18 @@ export const secretsScanner: Scanner = {
                 'client component instead.',
               file: relPath,
               line,
-              snippet: snippetAt(source, line),
+              snippet: redactedSnippet(lines.lineText(line)),
               cwe: 'CWE-668: Exposure of Resource to Wrong Sphere',
               owasp: 'A04:2025 - Cryptographic Failures',
             });
           }
         }
+      }
+      } catch (err) {
+        result.incomplete!.push(
+          `${relPath} could not be fully checked for secrets ` +
+            `(${err instanceof Error ? err.message : String(err)}); a credential in it may be unreported.`,
+        );
       }
     }
 
@@ -610,7 +749,7 @@ export const secretsScanner: Scanner = {
     );
     if (envPaths.length > 0 && exists(join(ctx.root, '.git'))) {
       const uncovered = envPaths
-        .filter((abs) => !rulesForPath(ctx.root, abs, read).ignores(abs, false))
+        .filter((abs) => !gitWouldIgnore(ctx.root, abs))
         .map((abs) => rel(ctx.root, abs));
       if (uncovered.length > 0) {
         const envFiles = uncovered;
@@ -640,6 +779,20 @@ export const secretsScanner: Scanner = {
           `${MAX_HITS_PER_RULE}-per-rule cap lists (${[...truncated].sort().slice(0, 3).join(', ')}` +
           `${truncated.size > 3 ? ', …' : ''}) — fix those files by hand, not one finding at a time`,
       );
+    }
+    if (overmatched.size > 0) {
+      const names = [...overmatched].sort();
+      const listed = `${names.slice(0, 3).join(', ')}${names.length > 3 ? ', …' : ''}`;
+      notes.push(
+        `${names.length} file${names.length === 1 ? '' : 's'} matched one credential pattern more than ` +
+          `${MAX_MATCHES_EXAMINED} times (${listed}); matches past that were not examined`,
+      );
+      for (const file of names) {
+        result.incomplete!.push(
+          `${file}: a credential pattern matched more than ${MAX_MATCHES_EXAMINED} times, and the ` +
+            'matches past that were not examined — a real key among them would not be reported.',
+        );
+      }
     }
     result.checks.push({
       label:

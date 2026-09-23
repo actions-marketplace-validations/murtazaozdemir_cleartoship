@@ -82,18 +82,63 @@ const TOOL_REGISTER = /^(registerTool|addTool|setRequestHandler|tool)$/;
  * wrong answer cannot be undone from: data deleted, money moved, a message sent
  * to somebody, a shell command, a file removed.
  */
-const IRREVERSIBLE: [RegExp, string][] = [
-  // The root has to be the whole first segment, not a prefix of it. `[\w.]*`
-  // let `client` match `clients.delete(sessionId)` on an in-memory Set — found
-  // in the MCP reference servers, where it was two false criticals. Same trap
-  // for `models`, `tables`, `repos`.
-  [
-    // cleartoship-ignore VG153 — `(\.[\w$]+)*`: every repetition must open with a
-    // literal `.` that `[\w$]` cannot consume, so the input splits one way and the
-    // match is linear. The input is a callee name read from the AST, not user text.
-    /^(db|prisma|supabase|sql|knex|drizzle|conn|pool|client|collection|table|model|repo|repository)(\.[\w$]+)*\.(delete|deleteMany|deleteOne|destroy|drop|truncate)$/i,
-    'deletes rows',
-  ],
+/** Words that name a database handle, as a whole word of the root's name. */
+const DB_CLIENT_WORDS = new Set([
+  'db', 'prisma', 'supabase', 'sql', 'knex', 'drizzle', 'conn', 'pool', 'client',
+  'collection', 'table', 'model', 'repo', 'repository', 'database', 'mongo', 'mongoose',
+]);
+
+/**
+ * Of those, the product names, which name a database handle wherever they sit
+ * in the name — at the start as well as the end: `supabaseAdmin`, `prismaTx`.
+ * The generic words do not count at the start: `modelCache.delete(key)` and
+ * `dbCache.delete(key)` are Maps.
+ */
+const DB_LEADING_WORDS = new Set(['prisma', 'supabase', 'knex', 'drizzle', 'mongo', 'mongoose']);
+
+/** Receivers that hold the handle rather than being it: `this.prisma`, `ctx.db`. */
+const CONTEXT_ROOTS = new Set(['this', 'ctx', 'context']);
+
+/** `supabaseAdmin` -> ['supabase', 'admin']; `admin_db` -> ['admin', 'db']. */
+function camelWords(name: string): string[] {
+  return name
+    .replace(/([a-z0-9])([A-Z])/g, '$1 $2')
+    .replace(/([A-Z]+)([A-Z][a-z])/g, '$1 $2')
+    .split(/[\s_$]+/)
+    .filter(Boolean)
+    .map((w) => w.toLowerCase());
+}
+
+/**
+ * Whether a callee deletes rows through a database handle.
+ *
+ * The root has to be a database handle by whole words, never by prefix. `[\w.]*`
+ * once let `client` match `clients.delete(sessionId)` on an in-memory Set — found
+ * in the MCP reference servers, where it was two false criticals. But the first
+ * fix demanded the root be *exactly* one of the names, so the way real apps
+ * spell their handles went unseen: `supabaseAdmin.from('customers').delete()`
+ * (the service-role client, which is the dangerous one), `adminDb`,
+ * `prismaClient`, and handles reached through `ctx.db` or `this.prisma`. Split
+ * on camelCase and snake_case, the name counts when it ends with a handle word
+ * (`adminDb`, `prismaClient`, `UserModel`) or starts with one that names a
+ * database on its own (`supabaseAdmin`) — and `clients`, `models`, `tables`
+ * are still other words.
+ */
+function deletesRows(full: string): boolean {
+  const segments = full.split('.');
+  if (segments.length < 2) return false;
+  if (!/^(delete|deleteMany|deleteOne|destroy|drop|truncate)$/i.test(segments[segments.length - 1]!)) {
+    return false;
+  }
+  let i = 0;
+  while (i < segments.length - 2 && CONTEXT_ROOTS.has(segments[i]!)) i++;
+  const words = camelWords(segments[i]!);
+  if (words.length === 0) return false;
+  return DB_CLIENT_WORDS.has(words[words.length - 1]!) || DB_LEADING_WORDS.has(words[0]!);
+}
+
+const IRREVERSIBLE: [{ test(name: string): boolean }, string][] = [
+  [{ test: deletesRows }, 'deletes rows'],
   [/(^|\.)\$(execute|query)Raw(Unsafe)?$/, 'executes raw SQL'],
   [/(^|\.)(rmSync|rmdir|rmdirSync|unlink|unlinkSync|rimraf)$|(^|\.)fs\.rm$|^rm$/, 'removes files'],
   // Bare `exec` is the child_process import; `re.exec(s)` is a regex match and
@@ -142,9 +187,13 @@ const OUTPUT_SINKS: [RegExp, string, Severity][] = [
 const DECISION_WORD =
   /^(yes|no|true|false|allow|allowed|deny|denied|safe|unsafe|approved|rejected|authorized|authorised|admin|ok|okay|pass|fail|valid|invalid|clean|abusive|spam)$/i;
 
-/** Function names that signal the body is making a security decision. */
+/**
+ * Function names that signal the body is making a security decision. The same
+ * list as logic.ts: `ensure` counts only when what it ensures is a security
+ * property (`ensureAdmin`), never on its own (`ensureDir`).
+ */
 const SECURITY_FN =
-  /(verify|validate|authenticate|authorize|auth|check(?:auth|access|permission)?|hasaccess|haspermission|isallowed|isauthorized|canaccess|ensure|guard|require(?:auth|user|admin)?)/i;
+  /(verify|validate|authenticate|authorize|auth|check(?:auth|access|permission)?|hasaccess|haspermission|isallowed|isauthorized|canaccess|ensure(?:admin|user|owner|member|role|permission|access|session|loggedin|signedin|login|allowed|authorized|authenticated)|guard|require(?:auth|user|admin)?)/i;
 
 /** A property/identifier name that names a real secret or piece of PII — reused
  * here only to judge whether an enclosing function reads as security-sensitive. */
@@ -287,9 +336,87 @@ function enclosingFunctionName(path: any): string {
       name = (n.key.name ?? n.key.value ?? '') as string;
       if (name) break;
     }
+    // Object and class methods are named by their key — NextAuth's
+    // `authorize() {}`, `class Guard { verify() {} }`. These were walked
+    // straight past, and whatever variable held the object named them instead.
+    if (
+      (n?.type === 'ObjectMethod' || n?.type === 'ClassMethod' || n?.type === 'ClassPrivateMethod') &&
+      n.key
+    ) {
+      name = (n.key.name ?? n.key.value ?? n.key.id?.name ?? '') as string;
+      if (name) break;
+    }
+    if ((n?.type === 'ClassProperty' || n?.type === 'ClassPrivateProperty') && n.key) {
+      name = (n.key.name ?? n.key.value ?? n.key.id?.name ?? '') as string;
+      if (name) break;
+    }
     p = p.parentPath;
   }
   return name;
+}
+
+/**
+ * A `const` in scope whose value is an object literal, if `node` names one.
+ * Anything else — a `let`, a parameter, a call's result — could hold anything.
+ */
+function constObject(node: any, path: any): any | null {
+  if (node?.type !== 'Identifier') return null;
+  const binding = path.scope?.getBinding?.(node.name);
+  if (binding?.kind !== 'const') return null;
+  const declarator = binding.path?.node;
+  if (declarator?.type !== 'VariableDeclarator') return null;
+  let init = declarator.init;
+  while (init?.type === 'TSAsExpression' || init?.type === 'TSSatisfiesExpression' || init?.type === 'ParenthesizedExpression') {
+    init = init.expression;
+  }
+  return init?.type === 'ObjectExpression' ? init : null;
+}
+
+/** Every key of an object literal, following spreads; null if a spread cannot be read. */
+function objectKeys(object: any, path: any, depth = 0): string[] | null {
+  const keys: string[] = [];
+  for (const p of object.properties ?? []) {
+    if (p?.type === 'ObjectProperty' || p?.type === 'ObjectMethod') {
+      keys.push((p.key?.name ?? p.key?.value ?? '') as string);
+      continue;
+    }
+    if (p?.type === 'SpreadElement') {
+      const inner =
+        depth < 4
+          ? p.argument?.type === 'ObjectExpression'
+            ? p.argument
+            : constObject(p.argument, path)
+          : null;
+      const innerKeys = inner ? objectKeys(inner, path, depth + 1) : null;
+      if (innerKeys === null) return null;
+      keys.push(...innerKeys);
+    }
+  }
+  return keys;
+}
+
+/**
+ * The option names a model call is given, or null when they cannot be known.
+ *
+ * `create({ ...base, messages })` with `max_tokens` in `base` was reported as a
+ * call with no ceiling: only the literal's own keys were read, and the spread
+ * that carried the ceiling was skipped. A spread of a local `const` object is
+ * now followed, and an options object that cannot be seen into — a spread of a
+ * parameter, an options variable built elsewhere — is not reported at all.
+ * Saying "no ceiling" about options it could not read is a guess stated as a
+ * finding.
+ */
+function optionKeysOf(args: any[], path: any): string[] | null {
+  for (const arg of args) {
+    const object = arg?.type === 'ObjectExpression' ? arg : constObject(arg, path);
+    if (object) return objectKeys(object, path);
+  }
+  // No object to read. A bare prompt string really has no options; an
+  // identifier or expression might be the whole options object.
+  const opaque = args.some(
+    (a: any) => a && a.type !== 'StringLiteral' && a.type !== 'TemplateLiteral' && a.type !== 'ArrayExpression',
+  );
+  return opaque ? null : [];
 }
 
 /** Does this function body take an action that cannot be undone? */
@@ -368,12 +495,17 @@ export const agentLogicScanner: Scanner = {
   async run(ctx: ProjectContext): Promise<ScanResult> {
     const result = emptyResult();
     let analysed = 0;
+    const unanalysed: string[] = [];
+    const failed: string[] = [];
 
     for (const file of ctx.files) {
       if (!isScript(file)) continue;
+      const relPath = rel(ctx.root, file);
+      // One file the analysis cannot finish — a 20,000-deep member chain
+      // overflows the stack in traversal — costs that file, not the run.
+      try {
       const source = read(file);
       if (source === null) continue;
-      const relPath = rel(ctx.root, file);
       const place = (f: any) => {
         const placed = adjustForPath(f.severity, relPath);
         return { ...f, severity: placed.severity, detail: f.detail + placed.note };
@@ -386,7 +518,11 @@ export const agentLogicScanner: Scanner = {
       };
 
       const ast = parseSource(source, file);
-      if (!ast) continue;
+      if (!ast) {
+        // Skipped silently, an unparseable file read as a file with nothing wrong in it.
+        unanalysed.push(relPath);
+        continue;
+      }
       analysed++;
 
       // Every binding in this file that holds what a model returned. Collected
@@ -490,7 +626,9 @@ export const agentLogicScanner: Scanner = {
               'and send the client only the answer.',
             line: path.node.loc?.start.line ?? 0,
             cwe: 'CWE-200: Exposure of Sensitive Information to an Unauthorized Actor',
-            owasp: 'A04:2025 - Cryptographic Failures',
+            // CWE-200 is Broken Access Control in OWASP 2025, as CTS013, CTS019
+            // and CTS031 file it; this said Cryptographic Failures.
+            owasp: 'A01:2025 - Broken Access Control',
             meta: { llm: OWASP_LLM.LLM08, binding: name },
           });
         },
@@ -502,12 +640,9 @@ export const agentLogicScanner: Scanner = {
 
           // --- LLM01 / LLM10: calls that send a prompt to a model ---
           if (matchesModelCall(full)) {
-            const options = node.arguments?.find((a: any) => a?.type === 'ObjectExpression');
-            const keys = (options?.properties ?? [])
-              .filter((p: any) => p?.type === 'ObjectProperty')
-              .map((p: any) => (p.key?.name ?? p.key?.value ?? '') as string);
+            const keys = optionKeysOf(node.arguments ?? [], path);
 
-            if (userReachable && !keys.some((k: string) => TOKEN_LIMITS.test(k))) {
+            if (userReachable && keys !== null && !keys.some((k: string) => TOKEN_LIMITS.test(k))) {
               push({
                 id: 'CTS081',
                 severity: 'medium',
@@ -783,6 +918,16 @@ export const agentLogicScanner: Scanner = {
           );
         },
       });
+      } catch (err) {
+        failed.push(`${relPath} (${err instanceof Error ? err.message : String(err)})`);
+      }
+    }
+
+    for (const f of unanalysed) {
+      result.incomplete!.push(`${f} could not be parsed, so the LLM and agent checks did not run on it.`);
+    }
+    for (const f of failed) {
+      result.incomplete!.push(`The LLM and agent checks could not finish ${f}.`);
     }
 
     result.checks.push({
