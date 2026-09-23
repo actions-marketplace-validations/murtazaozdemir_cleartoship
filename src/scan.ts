@@ -2,7 +2,9 @@ import { resolve } from 'node:path';
 import { statSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
-import { walk } from './utils/files.js';
+import { walk, safeRead, rel } from './utils/files.js';
+import { redactFindings } from './utils/redact.js';
+import { takeParseFailures } from './utils/ast.js';
 import { detectFramework } from './utils/detect.js';
 import { SCANNERS, communityScanner } from './scanners/index.js';
 import { GUARDVIBE_CVE_RULE_IDS } from './vendor/guardvibe/index.js';
@@ -37,6 +39,11 @@ export interface FullScan {
   oversizeCount: number;
   /** Build and dependency directories skipped whole, by name. */
   skippedDirs: string[];
+  /**
+   * Files and directories the walk could not open, relative to the root. None
+   * of them was checked, so any entry here also makes the run incomplete.
+   */
+  unreadable: string[];
   findings: Finding[];
   checks: CheckSummary[];
   warnings: string[];
@@ -67,12 +74,16 @@ export async function scan(options: ScanOptions): Promise<FullScan> {
     }
   });
 
-  const walked = roots.map((r) => walk(r, { respectGitignore: !options.noGitignore }));
+  const walked = roots.map((r) =>
+    walk(r, { respectGitignore: !options.noGitignore, projectRoot: root }),
+  );
   const files = [...new Set(walked.flatMap((w) => w.files))];
   const gitIgnoredCount = walked.reduce((n, w) => n + w.gitIgnored, 0);
   const escapingSymlinkCount = walked.reduce((n, w) => n + w.escapingSymlinks, 0);
   const oversizeCount = walked.reduce((n, w) => n + w.oversize, 0);
   const skippedDirs = [...new Set(walked.flatMap((w) => w.skippedDirs))].sort();
+  const unreadable = [...new Set(walked.flatMap((w) => w.unreadable))].map((p) => rel(root, p)).sort();
+  const walkWarnings = [...new Set(walked.flatMap((w) => w.warnings))];
   const framework = detectFramework(root, files);
 
   const ctx: ProjectContext = {
@@ -98,9 +109,22 @@ export async function scan(options: ScanOptions): Promise<FullScan> {
   const missingRootNotes = missingRoots.map(
     (r) => `${r} does not exist; nothing there was scanned.`,
   );
-  const warnings: string[] = [...missingRootNotes];
-  const incomplete: string[] = [...missingRootNotes];
+  // A file the walk could not open was checked by nothing. Every scanner used
+  // to meet it as a `read()` that returned null and carry on, so a `chmod 000`
+  // file counted as scanned and the run was reported clear.
+  const unreadableNotes =
+    unreadable.length > 0
+      ? [
+          `${unreadable.length} path${unreadable.length === 1 ? '' : 's'} could not be read ` +
+            `(permission denied?) and ${unreadable.length === 1 ? 'was' : 'were'} NOT scanned: ` +
+            unreadable.slice(0, 5).join(', ') +
+            (unreadable.length > 5 ? `, and ${unreadable.length - 5} more` : ''),
+        ]
+      : [];
+  const warnings: string[] = [...missingRootNotes, ...walkWarnings, ...unreadableNotes];
+  const incomplete: string[] = [...missingRootNotes, ...unreadableNotes];
 
+  takeParseFailures(files); // start from a clean slate for these files
   for (let i = 0; i < activeAll.length; i++) {
     const scanner = activeAll[i]!;
     options.onProgress?.(i + 1, activeAll.length, scanner.name);
@@ -122,13 +146,41 @@ export async function scan(options: ScanOptions): Promise<FullScan> {
     }
   }
 
+  // Files an AST rule could not parse or walk were not checked by it. Scanners
+  // are expected to say so themselves; anything they did not mention is said
+  // here, once, so a null parse can never quietly read as a clean file.
+  const unparsed = [...takeParseFailures(files)]
+    .map(([file, reason]) => ({ file: rel(root, file), reason }))
+    .filter(({ file }) => !incomplete.some((note) => note.includes(file)));
+  if (unparsed.length > 0) {
+    const shown = unparsed.slice(0, 5).map(({ file, reason }) => `${file} (${reason})`);
+    const note =
+      `${unparsed.length} file${unparsed.length === 1 ? '' : 's'} could not be parsed, so the ` +
+      `AST rules did NOT check ${unparsed.length === 1 ? 'it' : 'them'}: ${shown.join('; ')}` +
+      (unparsed.length > 5 ? `; and ${unparsed.length - 5} more` : '');
+    warnings.push(note);
+    incomplete.push(note);
+  }
+
+  // Credentials are masked once, here, for every rule: CTS030 always redacted
+  // what it reported, but other rules quoted the same line whole.
+  const lines = new Map<string, string[] | null>();
+  const sourceLine = (file: string, line: number): string | null => {
+    if (!lines.has(file)) {
+      const text = safeRead(root, file);
+      lines.set(file, text === null ? null : text.split('\n'));
+    }
+    return lines.get(file)?.[line - 1] ?? null;
+  };
+  const redacted = redactFindings(findings, sourceLine);
+
   // OSV.dev is authoritative and current; the vendored CVE-version regexes are
   // neither. If OSV answered for this project, stand them down rather than
   // report the same advisory twice from two sources of differing freshness.
   const osvAnswered = checks.some((c) => c.label.startsWith('Known vulnerabilities'));
   let filtered = osvAnswered
-    ? findings.filter((f) => !GUARDVIBE_CVE_RULE_IDS.has(f.id))
-    : findings;
+    ? redacted.filter((f) => !GUARDVIBE_CVE_RULE_IDS.has(f.id))
+    : redacted;
   if (options.ignore?.length) {
     const ignored = new Set(options.ignore.map((s) => s.toUpperCase()));
     filtered = filtered.filter((f) => !ignored.has(f.id.toUpperCase()));
@@ -220,6 +272,7 @@ export async function scan(options: ScanOptions): Promise<FullScan> {
     escapingSymlinkCount,
     oversizeCount,
     skippedDirs,
+    unreadable,
     findings: filtered,
     checks,
     warnings,

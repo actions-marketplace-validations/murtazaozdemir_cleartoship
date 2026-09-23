@@ -148,7 +148,10 @@ function normalise(vuln: any): OsvVulnerability {
 /**
  * Returns, per input query index, the vulnerabilities affecting that exact
  * version. Failures resolve to an empty list: a database outage must never be
- * reported as "no vulnerabilities", so the caller is told separately.
+ * reported as "no vulnerabilities", so the caller is told separately —
+ * `failed` is true when the batch failed, answered malformed, or any follow-up
+ * detail lookup for a package the batch flagged did not come back. Results
+ * that did come back are still returned alongside `failed: true`.
  */
 export async function queryOsv(
   queries: OsvQuery[],
@@ -181,8 +184,13 @@ export async function queryOsv(
   // querybatch returns ids only. Re-query the few packages that actually have
   // hits to get summaries and fixed versions.
   const results: OsvVulnerability[][] = queries.map(() => []);
+  // A 200 whose body does not answer every query is not an answer.
+  if (!Array.isArray(batch?.results) || batch.results.length !== queries.length) {
+    return { results, failed: true };
+  }
   const affected: number[] = [];
-  (batch?.results ?? []).forEach((r: any, i: number) => {
+  let detailFailed = false;
+  batch.results.forEach((r: any, i: number) => {
     if (Array.isArray(r?.vulns) && r.vulns.length > 0) affected.push(i);
   });
 
@@ -201,16 +209,27 @@ export async function queryOsv(
           }),
           signal: AbortSignal.timeout(TIMEOUT_MS),
         });
-        if (!res.ok) return;
+        // The batch already said this version is vulnerable. A detail query
+        // that fails used to leave the list empty and the run "checked" — a
+        // known-vulnerable package reported as clean because the second of
+        // two requests failed. Now it makes the result incomplete.
+        if (!res.ok) {
+          detailFailed = true;
+          return;
+        }
         const detail: any = await res.json();
-        results[i] = (detail?.vulns ?? []).map(normalise);
+        if (!Array.isArray(detail?.vulns) || detail.vulns.length === 0) {
+          detailFailed = true;
+          return;
+        }
+        results[i] = detail.vulns.map(normalise);
       } catch {
-        /* keep the empty list for this package */
+        detailFailed = true;
       }
     }),
   );
 
-  return { results, failed: false };
+  return { results, failed: detailFailed };
 }
 
 type OsvSeverity = 'critical' | 'high' | 'medium' | 'low';

@@ -96,6 +96,10 @@ program
   .option('--offline', 'skip registry lookups (no network)')
   .option('--no-community', 'run only ClearToShip rules, skipping the vendored community ruleset')
   .option('--no-gitignore', 'also scan files your .gitignore excludes')
+  .option(
+    '--allow-incomplete',
+    'exit 0 when nothing blocking was found even if some checks could not complete (default: exit 3)',
+  )
   .option('--ignore <ids>', 'comma-separated rule ids to skip, e.g. CTS004,CTS022')
   .option('--only <ids>', 'comma-separated rule ids to report exclusively')
   .option('--no-banner', 'suppress the ASCII header')
@@ -179,11 +183,40 @@ program
       process.stdout.write(output.endsWith('\n') ? output : output + '\n');
     }
 
-    if (opts.failOn === 'none') return;
-    const floor = SEVERITY_ORDER[opts.failOn as Severity];
-    const blocking = result.findings.filter((f) => SEVERITY_ORDER[f.severity] >= floor).length;
-    if (blocking > 0) process.exitCode = 1;
+    // Exit codes -- the contract CI and the Action depend on:
+    //   0  nothing at or above --fail-on, and every check completed
+    //   1  at least one finding at or above --fail-on (wins over 3)
+    //   2  the scan itself crashed
+    //   3  nothing blocking found, but the run is incomplete (a registry that
+    //      did not answer, a file that could not be read or parsed, a scanner
+    //      that threw); --allow-incomplete turns this back into 0
+    // --fail-on none always exits 0. An incomplete run used to exit 0, so a
+    // gate that could not look passed exactly like one that looked and found
+    // nothing.
+    process.exitCode = exitCodeFor(result, opts.failOn, Boolean(opts.allowIncomplete));
+    if (process.exitCode === 3) {
+      const n = result.incomplete.length;
+      process.stderr.write(
+        pc.yellow(
+          `\n  cleartoship: ${n} check${n === 1 ? '' : 's'} could not complete, so this run is not ` +
+            'a pass (exit 3). Pass --allow-incomplete to accept an incomplete run.\n',
+        ),
+      );
+    }
   });
+
+/** The process exit code for a finished scan; see the contract above. */
+export function exitCodeFor(
+  result: { findings: { severity: Severity }[]; incomplete?: string[] },
+  failOn: string,
+  allowIncomplete: boolean,
+): 0 | 1 | 3 {
+  if (failOn === 'none') return 0;
+  const floor = SEVERITY_ORDER[failOn as Severity];
+  if (result.findings.some((f) => SEVERITY_ORDER[f.severity] >= floor)) return 1;
+  if ((result.incomplete ?? []).length > 0 && !allowIncomplete) return 3;
+  return 0;
+}
 
 program.parseAsync(process.argv).catch((err) => {
   process.stderr.write(pc.red(`cleartoship: ${err instanceof Error ? err.message : String(err)}\n`));
