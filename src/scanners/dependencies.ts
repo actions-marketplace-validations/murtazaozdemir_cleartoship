@@ -900,8 +900,8 @@ export const dependencyScanner: Scanner = {
       if (failed) {
         result.incomplete = [
           ...(result.incomplete ?? []),
-          'OSV.dev did not answer, so the versions you depend on were NOT checked for known ' +
-            'vulnerabilities in this run.',
+          'OSV.dev did not answer (or answered only in part), so the versions you depend on were ' +
+            'NOT fully checked for known vulnerabilities in this run.',
         ];
       } else {
         osvChecked = osvQueries.length;

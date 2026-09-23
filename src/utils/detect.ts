@@ -1,5 +1,5 @@
 import { join } from 'node:path';
-import { exists, read } from './files.js';
+import { exists, safeRead } from './files.js';
 import type { FrameworkInfo } from '../types.js';
 
 function hasDep(pkg: any, name: string): boolean {
@@ -13,7 +13,8 @@ function hasDep(pkg: any, name: string): boolean {
 
 export function detectFramework(root: string, files: string[]): FrameworkInfo {
   let pkg: any = null;
-  const raw = read(join(root, 'package.json'));
+  // Contained: a root `package.json` symlinked outside the repository is not it.
+  const raw = safeRead(root, 'package.json');
   if (raw) {
     try {
       pkg = JSON.parse(raw);
@@ -51,7 +52,7 @@ export function detectFramework(root: string, files: string[]): FrameworkInfo {
     exists(join(root, 'metro.config.js')) ||
     exists(join(root, 'metro.config.ts')) ||
     exists(join(root, 'app.json')) &&
-      /\b(expo|react-native)\b/.test(read(join(root, 'app.json')) ?? '');
+      /\b(expo|react-native)\b/.test(safeRead(root, 'app.json') ?? '');
 
   const info: FrameworkInfo = {
     nextjs,
