@@ -1,8 +1,11 @@
 import {
   read, rel, isSql, snippetAt,
-  splitStatements, clauseAfter, normaliseTable, isAlwaysTrue, QUALIFIED_NAME,
+  splitStatements, normaliseTable, isAlwaysTrue, QUALIFIED_NAME,
   Suppressions, emptyResult,
 } from '../internal.js';
+// Not re-exported through internal.ts; sql.ts has no imports of its own, so
+// reaching it directly cannot introduce an initialisation-order cycle.
+import { readBalanced } from '../utils/sql.js';
 import type { Finding, ProjectContext, ScanResult, Scanner, Severity } from '../internal.js';
 
 const OWNER_COLUMNS = [
@@ -68,6 +71,61 @@ function parseColumns(body: string): string[] {
     .map((c) => /^("[^"]+"|[A-Za-z_][A-Za-z0-9_$]*)/.exec(c)?.[1] ?? '')
     .map((c) => c.replace(/^"(.*)"$/, '$1').toLowerCase())
     .filter((c) => c && !['constraint', 'primary', 'foreign', 'unique', 'check', 'exclude', 'like'].includes(c));
+}
+
+/**
+ * Parses what follows `CREATE POLICY <name> ON <table>`:
+ *   [AS PERMISSIVE|RESTRICTIVE] [FOR cmd] [TO role, ...] [USING (…)] [WITH CHECK (…)]
+ * The name and table are already consumed, so words inside a policy name
+ * ("Enable read access for all users", "Anyone can add to cart") can no longer
+ * be mistaken for the FOR or TO clause, and only the header — the part before
+ * USING / WITH CHECK — is searched for them, so a string literal inside a
+ * predicate cannot be either.
+ */
+function parsePolicyTail(tail: string): Pick<Policy, 'command' | 'roles' | 'permissive' | 'using' | 'withCheck'> {
+  const bodyStart = /\busing\s*\(|\bwith\s+check\s*\(/i.exec(tail);
+  const header = bodyStart ? tail.slice(0, bodyStart.index) : tail;
+  const body = bodyStart ? tail.slice(bodyStart.index) : '';
+
+  const permissive = !/^\s*as\s+restrictive\b/i.test(header);
+  const command = /\bfor\s+(all|select|insert|update|delete)\b/i.exec(header)?.[1]?.toUpperCase() ?? 'ALL';
+  const toClause = /\bto\s+(.+?)\s*$/i.exec(header)?.[1];
+  const roles = toClause
+    ? toClause.split(',').map((r) => r.trim().replace(/^"(.*)"$/, '$1').toLowerCase()).filter(Boolean)
+    : ['public'];
+
+  let using: string | null = null;
+  let withCheck: string | null = null;
+  let rest = body;
+  const usingKw = /^\s*using\s*(?=\()/i.exec(rest);
+  if (usingKw) {
+    const open = usingKw[0].length;
+    using = readBalanced(rest, open);
+    if (using !== null) rest = rest.slice(open + using.length + 2);
+  }
+  const checkKw = /^\s*with\s+check\s*(?=\()/i.exec(rest);
+  if (checkKw) withCheck = readBalanced(rest, checkKw[0].length);
+  return { command, roles, permissive, using, withCheck };
+}
+
+/** True when a policy admits nobody but the service role. */
+function serviceRoleOnly(p: Policy): boolean {
+  if (p.roles.length > 0 && p.roles.every((r) => r === 'service_role')) return true;
+  const predicates = [p.using, p.withCheck].filter((e): e is string => e !== null);
+  return predicates.length > 0 &&
+    predicates.every((e) => /^[\s(]*(?:select\s+)?auth\.role\(\)[\s)]*=\s*'service_role'[\s)]*$/i.test(e));
+}
+
+/** `DROP TABLE [IF EXISTS] a, b [CASCADE | RESTRICT]` → the tables it drops. */
+function droppedTables(flat: string): string[] | null {
+  const m = /^drop\s+table\s+(?:if\s+exists\s+)?(.+?)(?:\s+(?:cascade|restrict))?\s*$/i.exec(flat);
+  if (!m) return null;
+  const nameRe = new RegExp(`^${QUALIFIED_NAME}$`);
+  return m[1]!
+    .split(',')
+    .map((n) => n.trim())
+    .filter((n) => nameRe.test(n))
+    .map(normaliseTable);
 }
 
 export const rlsScanner: Scanner = {
@@ -146,41 +204,37 @@ export const rlsScanner: Scanner = {
         ).exec(flat);
         if (alter) {
           const name = normaliseTable(alter[1]!);
-          const verb = alter[2]!.toLowerCase();
+          const verb = alter[2]!.toLowerCase().replace(/\s+/g, ' ');
+          // FORCE / NO FORCE only decide whether the table owner is also subject
+          // to the policies. They do not turn RLS on or off: FORCE without ENABLE
+          // leaves the table unprotected, and NO FORCE after ENABLE leaves it on.
+          if (verb !== 'enable' && verb !== 'disable') continue;
           const t = tables.get(name);
-          if (t) t.rlsEnabled = verb === 'enable' || verb === 'force';
+          if (t) t.rlsEnabled = verb === 'enable';
           else {
             tables.set(name, {
-              name, columns: [], rlsEnabled: verb === 'enable' || verb === 'force',
+              name, columns: [], rlsEnabled: verb === 'enable',
               file: relPath, line: stmt.line, createdInPublic: name.startsWith('public.'),
             });
           }
           continue;
         }
 
-        const drop = new RegExp(`^drop\\s+table\\s+(?:if\\s+exists\\s+)?(${QUALIFIED_NAME})`, 'i').exec(flat);
-        if (drop) { tables.delete(normaliseTable(drop[1]!)); continue; }
+        const dropped = droppedTables(flat);
+        if (dropped) { for (const name of dropped) tables.delete(name); continue; }
 
         const policy = new RegExp(
           `^create\\s+policy\\s+(${QUALIFIED_NAME}|"[^"]+")\\s+on\\s+(${QUALIFIED_NAME})`,
           'i',
         ).exec(flat);
         if (policy) {
-          const cmd = /\bfor\s+(all|select|insert|update|delete)\b/i.exec(flat)?.[1]?.toUpperCase() ?? 'ALL';
-          const toClause = /\bto\s+([a-z_",\s]+?)(?:\s+using\b|\s+with\s+check\b|$)/i.exec(flat)?.[1];
-          const roles = toClause
-            ? toClause.split(',').map((r) => r.trim().replace(/^"(.*)"$/, '$1').toLowerCase()).filter(Boolean)
-            : ['public'];
+          const parsed = parsePolicyTail(flat.slice(policy[0].length));
           policies.push({
             name: policy[1]!.replace(/^"(.*)"$/, '$1'),
             table: normaliseTable(policy[2]!),
-            command: cmd,
-            roles,
-            permissive: !/\bas\s+restrictive\b/i.test(flat),
-            using: clauseAfter(text, /\busing\s*(?=\()/i),
-            withCheck: clauseAfter(text, /\bwith\s+check\s*(?=\()/i),
             file: relPath,
             line: stmt.line,
+            ...parsed,
           });
           continue;
         }
@@ -397,13 +451,19 @@ export const rlsScanner: Scanner = {
         continue;
       }
 
-      if (tablePolicies.length === 0) {
+      // RESTRICTIVE policies are AND-ed onto the permissive ones and never grant
+      // a row by themselves; with none permissive, RLS denies everything.
+      const grantingPolicies = tablePolicies.filter((p) => p.permissive);
+
+      if (grantingPolicies.length === 0) {
         findings.push({
           id: 'CTS011',
           severity: 'low',
           title: 'RLS enabled but no policy defined',
           detail:
-            `Table \`${table.name}\` has RLS on and no policies, so PostgreSQL denies every row to every ` +
+            `Table \`${table.name}\` has RLS on and ` +
+            (tablePolicies.length > 0 ? 'only restrictive policies, which grant nothing on their own' : 'no policies') +
+            ', so PostgreSQL denies every row to every ' +
             'non-superuser role. This is fail-closed and therefore safe, but it usually means a feature ' +
             'silently returns empty results.',
           fix: 'Add the policies this table needs, or confirm it is only ever reached via a service-role client.',
@@ -419,13 +479,20 @@ export const rlsScanner: Scanner = {
       const sensitive = table.columns.filter((c) =>
         SENSITIVE_COLUMNS.some((s) => c === s || c.includes(s)),
       );
+      // Tenant isolation means comparing a row to *who* the caller is: auth.uid(),
+      // a JWT claim, or the request claims. `auth.role() = 'authenticated'` only
+      // says the caller is signed in — every signed-in user then sees every
+      // row, which is exactly what CTS014 is about — so it does not count.
       const referencesAuth = tablePolicies.some((p) =>
-        /auth\.uid\(\)|auth\.jwt\(\)|current_setting\s*\(|auth\.role\(\)/i.test(
+        /auth\.uid\(\)|auth\.jwt\(\)|current_setting\s*\(/i.test(
           `${p.using ?? ''} ${p.withCheck ?? ''}`,
         ),
       );
+      // A policy that only admits the service role reaches no end user (and the
+      // service role bypasses RLS anyway), so it cannot leak rows across users.
+      const reachesUsers = grantingPolicies.some((p) => !serviceRoleOnly(p));
 
-      if (ownerColumn && !referencesAuth) {
+      if (ownerColumn && !referencesAuth && reachesUsers) {
         findings.push({
           id: 'CTS014',
           severity: 'high',
@@ -453,7 +520,8 @@ export const rlsScanner: Scanner = {
         if (!publicFacing) continue;
         const anonFacing = p.roles.some((r) => UNAUTHENTICATED_ROLES.has(r));
         const isWrite = p.command !== 'SELECT';
-        const permissive = isAlwaysTrue(p.using) || isAlwaysTrue(p.withCheck);
+        // An always-true RESTRICTIVE policy is a no-op filter, not a grant.
+        const permissive = p.permissive && (isAlwaysTrue(p.using) || isAlwaysTrue(p.withCheck));
 
         if (permissive && isWrite) {
           findings.push({
@@ -565,7 +633,7 @@ export const rlsScanner: Scanner = {
     // Supabase Storage listing: a broad SELECT policy on storage.objects lets a
     // caller enumerate every file in every bucket, public or not (splinter 0025).
     for (const p of policies) {
-      if (p.table !== 'storage.objects') continue;
+      if (p.table !== 'storage.objects' || !p.permissive) continue;
       if (p.command !== 'SELECT' && p.command !== 'ALL') continue;
       if (!p.roles.some((r) => UNAUTHENTICATED_ROLES.has(r))) continue;
       const predicate = `${p.using ?? ''} ${p.withCheck ?? ''}`;
