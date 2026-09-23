@@ -114,20 +114,79 @@ Marketplace's limit. The first attempted fix broke `action.yml` outright (an
 unquoted colon reads as a YAML mapping key); the `Action integration test`
 workflow caught it within a minute, before it reached a tag.
 
+**The 2026-09-23 full audit (unreleased; on branch `audit-fixes`) found the
+worst failure class this project exists to prevent — "clear" on code it never
+read — in eight separate places, in this tool itself.** A committed `.gitignore`
+could hide a tracked file (a PR adds `app/backdoor.ts` to `.gitignore` and the
+scan is 🟢, exit 0); a `test/fixtures/x/package.json` named `minimist` switched
+off the CVE and registry checks for the root's real `minimist@1.2.0`; a 40 KB
+`a.b.b.b…` chain overflowed the stack and killed three whole scanners, taking a
+real CTS001 in another file with it, and still exited 0; `.ts` files were
+parsed with JSX on, so a `<string>x` cast made the file unparsed and the run
+clear; unreadable files, files over the 2 MB cap and files the community ruleset
+thought too big (400 KB–2 MB) were all silently skipped. Now every one of those
+is `incomplete`, and **an incomplete run exits 3** unless `--allow-incomplete`
+is passed; the Action fails on it by default. `.git/index` is parsed (v2–v4, no
+child process) so a tracked file is always scanned. Detection gaps found in the
+same pass and fixed: Pages Router API routes, `export { fn }` / `export default
+fn` / `cache(async …)` / NextAuth `export { handler as POST }` were never
+analysed; an auth call counted wherever it sat — after the write, in a
+`NODE_ENV === 'test'` branch, in a closure never called, or as `if (session)
+return`; Supabase's own default policy name "Enable read access **for all**
+users" was parsed as `FOR ALL` (critical false positive) and a name containing
+" to " swallowed the role list (missed critical); FORCE was read as ENABLE;
+restrictive policies were judged as grants. The untrusted-input side: CTS031 and
+vendored rules printed full secrets beside CTS030's redacted copy (now one
+redaction pass over every finding); filenames and install scripts could inject
+links, images and @-mentions into the PR comment and ANSI into the terminal;
+lockfiles and `.gitignore` were read through symlinks (a `.gitignore ->
+/dev/zero` ate 2 GB in two seconds); VG678 went 8 KB → 8.5 s (bounded override,
+now 8 ms, same match positions on ~1.5M checked); a hostile `.gitignore` glob
+spun past two minutes (linear matcher, 0 differences from the old one over 200k
+fuzzed cases). Supply chain: releases now carry build-provenance attestations
+from a publish job that never runs `npm ci`, the Action verifies the bundle's
+attestation and version before running it, every action is SHA-pinned, and the
+Cloudflare token no longer sits in the env of `npm ci`. And the landing page had
+said `@v0.8.0` since 0.8.0 — the version-pin check only read the README; it now
+reads `site/public/*.html` too. **Verification:** 101 → 205 tests, every new one
+failing before its fix; each audit PoC re-run against the merged build; the
+Server Actions changes run before/after on ten real Next.js repos here, which
+caught and fixed two CTS004 false positives the first version introduced in
+aistoreaudit. Self-scan down to five lows; the self-scan also found the last
+bug of the pass — the comment lexer did not know regex literals, so a backtick
+in `/`\s*,/` opened a phantom template string in `community.ts` and VG105
+fired on a sentence a hundred lines later.
+
 ## Open
 
-- [ ] **Wire up Stripe billing.** `site/src/stripe-webhook.ts` and
-      `stripe-client.ts` are already written — webhook-driven license
-      grant/revoke on `customer.subscription.*` events — but not live:
-      `STRIPE_SECRET_KEY` and `STRIPE_WEBHOOK_SECRET` are unset, and there's no
-      Checkout flow or webhook endpoint configured in the Stripe dashboard yet.
-      Deferred on purpose: first licenses are being issued **manually** against
-      PayPal payments (see `/admin/license/issue`) so the rest of the pipeline —
-      D1 schema, Ed25519 token signing, `/license/verify` — gets proven out
-      end to end before adding a payment processor into the loop. Also still
-      open whenever this resumes: `currentPeriodEnd()`'s field-name fallback in
-      `stripe-webhook.ts` needs re-checking against whichever Stripe API
-      version the real account ends up pinned to.
+- [ ] **Ship the audit fixes.** Merge `audit-fixes` to `main`, bump to 0.13.11
+      and release — the first release with build-provenance attestations. Until
+      0.13.11 exists, README and `examples/security-cli.yml` show `gh attestation
+      verify` against v0.13.10, which has no attestation and fails; the Action
+      handles pre-attestation versions by building its own checkout.
+      Maintainer-only, not doable from the repo: **enable immutable releases**
+      (release.yml already publishes via a draft, so it is compatible), **delete
+      the dead `NPM_TOKEN` secret**, and add a **Cloudflare rate-limit rule** on
+      `/license/*` and `/webhooks/*`.
+- [ ] **Known limits left by the audit, on purpose.** A whole-repo scan builds
+      one SQL schema from every `.sql` file, so separate projects' migrations
+      mix (visible on this repo's own fixtures). CTS014 still counts a table
+      isolated if any one policy uses `auth.uid()`, even when an OR'd
+      `auth.role() = 'authenticated'` policy leaks. ~35 vendored patterns are
+      still super-linear on adversarial input; 64 KB windows plus a per-rule time
+      budget cap them (a budget overrun is `incomplete`), but files ≤400 KB are
+      searched whole. Auth wrappers are credited by name
+      (`withIronSessionApiRoute` counts), and an action that reads the session
+      only to turn signed-in users away (`if (session) redirect('/')`) is now a
+      CTS001.
+- [ ] **Billing stays dormant (free in beta).** The Worker's webhook, key-id and
+      missing-secret bugs were fixed in the audit, and migration
+      `0002_license_per_subscription.sql` must be applied remotely
+      (`wrangler d1 migrations apply cleartoship-licenses --remote`) before any
+      payment is taken. There is no `/admin/license/issue` route and no
+      client-side license verifier; both would have to be written first.
+      `currentPeriodEnd()`'s field-name fallback still needs checking against
+      whatever Stripe API version a real account is pinned to.
 - [ ] **Get it in front of people, as early as possible.** Publish and publicize
       now; there is no minimum number of users to reach first (decided 2026-09-21).
       Every calibration decision so far was made against my own six repositories,

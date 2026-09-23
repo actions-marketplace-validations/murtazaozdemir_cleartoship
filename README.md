@@ -257,7 +257,7 @@ it is strongest exactly where AI-generated code fails. Coverage by category:
 
 Counts, measured across the vendored ruleset after normalisation: A01 121,
 A05 112, A04 78, A02 59, A03 32, A07 17, A06 13, A08 11, A09 2. ClearToShip's
-own 46 rules add A01 21, A03 9, A04 7, A08 3, A05 3, and one each for A07, A09
+own 46 rules add A01 23, A03 9, A04 5, A08 3, A05 3, and one each for A07, A09
 and A10 — which is the category no vendored rule reaches.
 
 ## OWASP Top 10 for LLM Applications (2026) — coverage
