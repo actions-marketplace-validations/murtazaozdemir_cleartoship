@@ -1,4 +1,7 @@
-import { read, rel, lineAt, snippetAt, languagesFor } from '../utils/files.js';
+import { performance } from 'node:perf_hooks';
+import { read, rel, languagesFor } from '../utils/files.js';
+import { LineIndex, clip } from '../utils/line-index.js';
+import { redactCredential } from '../utils/entropy.js';
 import { Suppressions } from '../utils/suppress.js';
 import { adjustForPath } from '../utils/paths.js';
 import { commentStyleFor, lexSpans, isInside } from '../utils/spans.js';
@@ -384,10 +387,6 @@ const MATCH_GUARDS: Record<
   // machine and crosses no trust boundary of yours.
   VG120: (_match, source) => !/^\s*(['"])use client\1/m.test(source.slice(0, 400)),
 
-  // The name list is prefix-matched with `\w*` after it, so `hashPage === 'x'`
-  // and `tokenCount === 3` read as secret comparisons. A timing attack needs the
-  // *secret itself* on one side, so the identifier has to be one of those words,
-  // not merely start with one.
   // Both of these learned an API name that moved. The Vercel AI SDK replaced
   // `maxSteps` with `stopWhen`, and across a corpus of real agent apps
   // (vercel/ai-chatbot, assistant-ui, the MCP reference servers) `stopWhen` is
@@ -402,6 +401,20 @@ const MATCH_GUARDS: Record<
   VG1033: (_match, source, index) => !HAS_STEP_CAP.test(source.slice(index, index + 1200)),
   VG999: (_match, source, index) => !HAS_STEP_CAP.test(source.slice(index, index + 1200)),
 
+  // The negative lookahead in this rule can never fire: its tempered run may be
+  // empty, so any `)` within 500 characters of the call's `(` completes a
+  // match, and `new ApolloServer({ introspection: false })` — the fix the rule
+  // asks for, and the rule's own `fixCode` — was reported as the problem. Read
+  // the call's real argument list for the setting instead.
+  VG974: (_match, source, index) =>
+    !/\bintrospection\s*:\s*(?:false\b|[^,}\n]*(?:NODE_ENV|production|isProd|isDev))|useDisableIntrospection/.test(
+      callArgs(source, index),
+    ),
+
+  // The name list is prefix-matched with `\w*` after it, so `hashPage === 'x'`
+  // and `tokenCount === 3` read as secret comparisons. A timing attack needs the
+  // *secret itself* on one side, so the identifier has to be one of those words,
+  // not merely start with one.
   VG106: (match) => {
     const identifier = /^[A-Za-z_$][\w$]*/.exec(match)?.[0] ?? '';
     return /(secret|token|apikey|api_key|signature|hmac|hash|digest|webhook)$/i.test(identifier);
@@ -417,8 +430,192 @@ const MATCH_GUARDS: Record<
 
 };
 
-/** Regexes over very large files are where catastrophic backtracking bites. */
-const MAX_BYTES = 400_000;
+/**
+ * Bounded replacements for vendored patterns whose backtracking is super-linear
+ * in the size of the file. The vendored files stay a faithful copy of upstream;
+ * the replacement is used in its place at runtime. Each one matches at exactly
+ * the positions upstream's does for any input with the features the rule is
+ * about within a few kilobytes of each other — the only difference is that the
+ * search from any one position is bounded, so a file of the rule's own trigger
+ * word repeated cannot stall the scan. `test/rules-audit.test.js` checks each
+ * against its original, position by position, on generated inputs.
+ */
+export const PATTERN_OVERRIDES: Record<string, RegExp> = {
+  // Upstream: `TRIGGER[\s\S]{0,500}?(?:(?!X-Content-Type-Options|nosniff)[\s\S]){10,}?TERMINATOR`.
+  // A lazy skip of up to 500 characters, then an *unbounded* tempered run —
+  // every split of the gap between the two is tried, from every trigger. A file
+  // of `res.sendFile(` repeated took 8.5 s at 8 KB and grew about 4.5x per
+  // doubling. Reading the pattern for what it accepts: the skip can always be
+  // stretched so the tempered run is its minimum of ten characters, so a
+  // terminator 10-510 characters on matches unless `nosniff` starts in the ten
+  // characters before it (`X-Content-Type-Options` is 22 long and cannot fit
+  // there without overlapping the terminator), and a terminator further on
+  // matches when nothing forbidden starts past the 500th character. The second
+  // branch is where the bound is: 2,000 characters past that point.
+  VG678:
+    /(?:res\.sendFile|res\.download|createReadStream|getSignedUrl|getPublicUrl|\.pipe\s*\(\s*res)(?:[\s\S]{10,510}?(?<!nosniff[\s\S]{0,3})(?:res\.end|\.pipe|return|response)|[\s\S]{500}(?:(?!X-Content-Type-Options|nosniff)[\s\S]){11,2000}?(?:res\.end|\.pipe|return|response))/gi,
+
+  // Upstream: `TRIGGER\s*\([\s\S]{0,500}?(?:(?!introspection\s*:\s*false)[\s\S]){0,300}\)`,
+  // the same nested shape: 80 KB took 3 s. The tempered run may be empty, so
+  // any `)` within 500 characters of the `(` matches outright, and one up to
+  // 300 further matches when `introspection: false` does not start past the
+  // 500th character. That is all this says, with each branch bounded.
+  VG974:
+    /(?:introspection\s*:\s*true|enableIntrospection|ApolloServer|createYoga|createHandler)\s*\((?:[\s\S]{0,500}?\)|[\s\S]{500}(?:(?!introspection\s*:\s*false)[\s\S]){0,300}?\))/g,
+
+  // Upstream: `echo\s+['"]?[^'"|\n]+['"]?\s*\|…|(?:mysql|psql|mongosh?)\s+.*-p…`.
+  // `[^'"|\n]+` and `.*` each run to the end of the line from every `echo` or
+  // `mysql` on it and backtrack all the way home when there is no pipe or `-p`,
+  // so one long line of them is quadratic. A command line is not 500
+  // characters of echo payload or of flags before the password.
+  VG533:
+    /(?:echo\s+['"]?[^'"|\n]{1,500}['"]?\s*\|\s*sudo\s+-[Ss]|(?:mysql|psql|mongosh?)\s+.{0,500}-p\s*['"]?\w+['"]?)/gi,
+
+  // Upstream: `TRIGGER\w*\s*(?:=\s*async|\([\s\S]*?\)\s*(?:=>|{))(?:(?!confirm|…)[\s\S]){10,}?(?:delete|…)\s*\(`.
+  // Found on real code, not a fuzz input: `terminat` matches `terminator`, and
+  // from each one the unbounded parameter list and tempered run search the
+  // rest of the file — six seconds on @babel/parser's 480 KB build, against
+  // single-digit milliseconds for every other rule. Bounded here to a
+  // 1,000-character parameter list and a destructive call within 3,000
+  // characters of it; a function body further from its own signature than
+  // that is not what this rule is reading anyway.
+  VG958:
+    /(?:deleteAccount|deleteUser|cancelSubscription|transferFunds|refund|terminat)\w*\s*(?:=\s*async|\([\s\S]{0,1000}?\)\s*(?:=>|{))(?:(?!confirm|verify|reauthenticate|twoFactor|2fa|otp|challenge)[\s\S]){10,3000}?(?:delete|destroy|remove|cancel)\s*\(/gi,
+};
+
+/**
+ * Files up to the walker's own 2 MB cap are run through the ruleset. This was
+ * 400 KB, and a file between the two was skipped here without a word: an
+ * `eval(req.body.code)` in a 420 KB module was never looked at, the run said
+ * clear, and nothing said why.
+ *
+ * The 400 KB cap existed for a real reason — fuzzing the ruleset with each
+ * rule's own trigger word repeated finds more than a dozen patterns whose cost
+ * grows with the square of the input — so the files above it are not handed
+ * to a regex whole. They are searched in line-aligned windows (below), which
+ * caps what one uninterruptible `exec` can cost at what a WINDOW-sized input
+ * costs, and makes the total linear in the size of the file.
+ */
+const MAX_BYTES = 2_000_000;
+
+/** Files above this are searched in windows rather than whole. The old cap, so nothing it scanned changes. */
+const WINDOW_FROM = 400_000;
+/** Each window owns this many characters: a match is taken from the window it starts in. */
+const WINDOW = 64_000;
+/**
+ * How far past its own region a window reads, so a match that starts near the
+ * end of one window can finish. Real matches for these rules are a few
+ * hundred characters; a match longer than this starting in the last stretch
+ * of a window would be missed, and that is the only difference windowing makes.
+ */
+const WINDOW_OVERLAP = 16_000;
+
+/**
+ * A rule that spends longer than this per 400 KB of input on one file is
+ * behaving super-linearly on it. It is not run on any file at least half that
+ * size again (a quadratic rule at half the size costs a quarter), and each file
+ * it was not run on is reported as not checked. The budget is checked before
+ * each search, so a rule that exceeds it part-way through a file stops there,
+ * and that file is reported too.
+ */
+const RULE_BUDGET_MS = 250;
+
+function budgetFor(length: number): number {
+  return RULE_BUDGET_MS * Math.max(1, length / WINDOW_FROM);
+}
+
+/**
+ * A pattern anchored to the start of its *input* (leading `^` without the `m`
+ * flag — VG964 reads the whole module through lookaheads from there) or to its
+ * end (`$`: VG446) would match at window boundaries, so it is run over the
+ * whole file. A `(?:^|\n)` alternative is fine windowed: windows start on a
+ * line, where it would match anyway.
+ */
+export function anchoredToInput(re: RegExp): boolean {
+  if (re.multiline) return false;
+  const source = re.source.replace(/\\\\/g, '').replace(/\[(?:\\.|[^\]\\])*\]/g, '');
+  return source.startsWith('^') || /(?:^|[^\\])\$/.test(source);
+}
+
+interface Segment {
+  /** Offset of `text` in the file. */
+  start: number;
+  /** Matches starting at or past this offset belong to the next segment. */
+  ownEnd: number;
+  text: string;
+}
+
+/** The whole file, or line-aligned windows of it for a large file. */
+function segmentsOf(source: string, whole: boolean): Segment[] {
+  if (whole || source.length <= WINDOW_FROM) {
+    return [{ start: 0, ownEnd: source.length, text: source }];
+  }
+  const segments: Segment[] = [];
+  let start = 0;
+  while (start < source.length) {
+    let ownEnd = Math.min(source.length, start + WINDOW);
+    if (ownEnd < source.length) {
+      const newline = source.indexOf('\n', ownEnd);
+      // A file with no newline for a long way is still windowed, just not on a line.
+      ownEnd = newline === -1 || newline - ownEnd > WINDOW_OVERLAP / 2 ? ownEnd : newline + 1;
+    }
+    const end = Math.min(source.length, ownEnd + WINDOW_OVERLAP);
+    segments.push({ start, ownEnd: ownEnd >= source.length ? source.length : ownEnd, text: source.slice(start, end) });
+    start = ownEnd;
+  }
+  return segments;
+}
+
+/**
+ * `lexSpans` declines inputs over 1 MB and returns no spans, which would read
+ * every comment in a 1-2 MB file as code. Lex it in line-aligned halves
+ * instead; only a block comment or template literal straddling the split can
+ * be misread.
+ */
+function lexLarge(source: string, style: ReturnType<typeof commentStyleFor>): Span[] {
+  const LIMIT = 900_000;
+  if (source.length <= LIMIT) return lexSpans(source, style);
+  const spans: Span[] = [];
+  let start = 0;
+  while (start < source.length) {
+    let end = Math.min(source.length, start + LIMIT);
+    if (end < source.length) {
+      const newline = source.lastIndexOf('\n', end);
+      if (newline > start) end = newline + 1;
+    }
+    for (const s of lexSpans(source.slice(start, end), style)) {
+      spans.push({ start: s.start + start, end: s.end + start, kind: s.kind });
+    }
+    start = end;
+  }
+  return spans;
+}
+
+/**
+ * Vendored rules about a credential, by their own name. Their match is the
+ * credential more often than not, and the snippet printed it whole: `VG003`
+ * on `--api-key sk_live_…` quoted the live key into the report.
+ */
+const CREDENTIAL_RULE =
+  /hardcoded|hard-coded|secret|credential|api key|token|password|connection string|service account key/i;
+
+/**
+ * The line with every credential-looking value inside `match` redacted: a
+ * quoted value with no spaces in it, or an opaque run of 16+ characters with a
+ * digit (which leaves variable names like `STRIPE_SECRET_KEY` readable).
+ */
+function redactMatchInLine(lineText: string, match: string): string {
+  const values = new Set<string>();
+  for (const q of match.matchAll(/(["'`])([^\s"'`]{8,})\1/g)) values.add(q[2]!);
+  for (const run of match.matchAll(/[A-Za-z0-9_\-+/=.]{16,}/g)) {
+    if (/\d/.test(run[0]) && !/^(?:process\.env|import\.meta)/.test(run[0])) values.add(run[0]);
+  }
+  let text = lineText;
+  for (const value of [...values].sort((a, b) => b.length - a.length)) {
+    text = text.split(value).join(redactCredential(value));
+  }
+  return clip(text.trim());
+}
 
 /** Upstream severities already use our vocabulary; this just narrows the type. */
 function severityOf(value: string): Severity {
@@ -524,55 +721,95 @@ export const communityScanner: Scanner = {
     );
     const seen = new Set<string>();
     let filesScanned = 0;
+    // Files the ruleset did not read, or read only partly, and why.
+    const oversize: string[] = [];
+    const failed: string[] = [];
+    // Rule id -> the size of the file on which it overran RULE_BUDGET_MS.
+    const slowRules = new Map<string, number>();
+    // Rule id -> files it was skipped on, or stopped part-way through.
+    const unchecked = new Map<string, string[]>();
+    const markUnchecked = (id: string, relPath: string) => {
+      const list = unchecked.get(id) ?? [];
+      list.push(relPath);
+      unchecked.set(id, list);
+    };
 
     for (const file of ctx.files) {
       const languages = languagesFor(file);
       if (languages.length === 0) continue;
-      const source = read(file);
-      if (source === null || source.length > MAX_BYTES) continue;
-
       const relPath = rel(ctx.root, file);
+      // One file that throws must cost that file, not the rest of the run.
+      try {
+      const source = read(file);
+      if (source === null) continue;
+      if (source.length > MAX_BYTES) {
+        oversize.push(relPath);
+        continue;
+      }
+
       const lockfile = LOCKFILE.test(relPath);
-      const spans = lexSpans(source, commentStyleFor(languages));
+      const spans = lexLarge(source, commentStyleFor(languages));
       const suppress = new Suppressions(source);
+      const lines = new LineIndex(source);
       filesScanned++;
 
       for (const rule of active) {
         if (!rule.languages.some((l) => languages.includes(l))) continue;
         if (lockfile && MANIFEST_ONLY.has(rule.id)) continue;
+        const slowAt = slowRules.get(rule.id);
+        if (slowAt !== undefined && source.length >= slowAt / 2) {
+          markUnchecked(rule.id, relPath);
+          continue;
+        }
         const guard = MATCH_GUARDS[rule.id];
+        const credential = CREDENTIAL_RULE.test(rule.name);
 
-        const re = rule.pattern;
-        re.lastIndex = 0;
+        const re = PATTERN_OVERRIDES[rule.id] ?? rule.pattern;
         let m: RegExpExecArray | null;
         let matches = 0;
-        while ((m = re.exec(source)) !== null) {
+        const started = performance.now();
+        const budget = budgetFor(source.length);
+        let cutShort = false;
+        segments: for (const segment of segmentsOf(source, anchoredToInput(re))) {
+        re.lastIndex = 0;
+        // The budget is checked before each further search, so a match already
+        // found is always handled and only the unsearched remainder is lost.
+        for (;;) {
+          if (performance.now() - started > budget) {
+            cutShort = true;
+            break segments;
+          }
+          m = re.exec(segment.text);
+          if (m === null) break;
           // A zero-width match would spin forever on a global regex.
           if (m[0].length === 0) {
             re.lastIndex++;
             continue;
           }
+          const index = segment.start + m.index;
+          // Past this window's own region: the next window reads it from its start.
+          if (index >= segment.ownEnd) break;
           // Skipping a match must not skip the non-global `break` below, or a
           // rule without /g would rescan from zero forever.
           // A rule that matched inside a comment matched prose about code, not
           // code. Nothing in the vendored ruleset targets comment content, and
           // a commented-out call is not a call.
-          if (isInside(spans, m.index, 'comment')) {
+          if (isInside(spans, index, 'comment')) {
             if (!re.global) break;
             continue;
           }
-          if (guard && !guard(m[0], source, m.index, spans)) {
+          if (guard && !guard(m[0], source, index, spans)) {
             if (!re.global) break;
             continue;
           }
           // Some rules open with `(?:^|\n)\s*`, so the match starts on the
           // newline ending the previous line. Locate the first character that
           // is actually part of the finding, or it is reported one line early.
-          const line = lineAt(source, m.index + (m[0].length - m[0].trimStart().length));
+          const line = lines.lineAt(index + (m[0].length - m[0].trimStart().length));
           const key = `${relPath}:${line}:${rule.id}`;
           if (!seen.has(key) && !suppress.suppressed(line, rule.id)) {
             seen.add(key);
-            let adjusted = SEVERITY_ADJUSTERS[rule.id]?.(m[0], source, m.index) ?? null;
+            let adjusted = SEVERITY_ADJUSTERS[rule.id]?.(m[0], source, index) ?? null;
             // A CVE in something that only ever runs on a build machine is not
             // a shipping vulnerability. OSV-sourced findings are already split
             // this way (CTS024); this is the same split for the vendored CVE
@@ -581,7 +818,7 @@ export const communityScanner: Scanner = {
               !adjusted &&
               GUARDVIBE_CVE_RULE_IDS.has(rule.id) &&
               (lockfile || /(^|\/)package\.json$/.test(relPath)) &&
-              inDevDependencies(source, m.index)
+              inDevDependencies(source, index)
             ) {
               adjusted = {
                 severity: 'low',
@@ -599,7 +836,9 @@ export const communityScanner: Scanner = {
               fix: rule.fixCode ? `${rule.fix}\n\n${rule.fixCode}` : rule.fix,
               file: relPath,
               line,
-              snippet: snippetAt(source, line),
+              snippet: credential
+                ? redactMatchInLine(lines.lineText(line), m[0])
+                : lines.snippet(line),
               owasp: rule.owasp,
               meta: {
                 source: 'guardvibe',
@@ -609,19 +848,55 @@ export const communityScanner: Scanner = {
             });
           }
           // One finding per rule per file is enough to act on.
-          if (++matches >= 3) break;
+          if (++matches >= 3) break segments;
           if (!re.global) break;
         }
+        }
+        if (cutShort) markUnchecked(rule.id, relPath);
+        if (performance.now() - started > budget) {
+          const previous = slowRules.get(rule.id);
+          slowRules.set(rule.id, previous === undefined ? source.length : Math.min(previous, source.length));
+        }
       }
+      } catch (err) {
+        failed.push(`${relPath} (${err instanceof Error ? err.message : String(err)})`);
+      }
+    }
+
+    const notes = [
+      `${SUPERSEDED.size} superseded by ClearToShip's AST checks, ${WITHHELD.size} withheld as noisy, ` +
+        `${MANIFEST_ONLY.size} manifest-only (not run over lockfiles)`,
+    ];
+    if (Object.keys(PATTERN_OVERRIDES).length > 0) {
+      notes.push(
+        `${Object.keys(PATTERN_OVERRIDES).length} run with a bounded pattern in place of upstream's ` +
+          `(${Object.keys(PATTERN_OVERRIDES).join(', ')})`,
+      );
+    }
+    if (platform.why.length) notes.push(`skipped as inapplicable: ${platform.why.join(', ')}`);
+    const incomplete = result.incomplete!;
+    if (oversize.length > 0) {
+      notes.push(`${oversize.length} file${oversize.length === 1 ? '' : 's'} over ${MAX_BYTES / 1_000_000} MB not read`);
+      for (const f of oversize) {
+        incomplete.push(`${f} is over the community ruleset's ${MAX_BYTES / 1_000_000} MB limit and was not checked by it.`);
+      }
+    }
+    for (const [id, files] of [...unchecked].sort(([a], [b]) => a.localeCompare(b))) {
+      const shown = `${files.slice(0, 3).join(', ')}${files.length > 3 ? `, and ${files.length - 3} more` : ''}`;
+      notes.push(`${id} stopped on ${files.length} file${files.length === 1 ? '' : 's'} after exceeding its time budget (${RULE_BUDGET_MS} ms per 400 KB)`);
+      incomplete.push(
+        `${id} exceeded its time budget (${RULE_BUDGET_MS} ms per 400 KB of file) and was not run to completion on ${shown}; ` +
+          'what it looks for there was not checked.',
+      );
+    }
+    for (const f of failed) {
+      incomplete.push(`The community ruleset could not finish ${f}; the rest of that file was not checked.`);
     }
 
     result.checks.push({
       label: `Community ruleset (${active.length} rules over ${filesScanned} files)`,
       passed: result.findings.every((f) => f.severity !== 'critical'),
-      note:
-        `${SUPERSEDED.size} superseded by ClearToShip's AST checks, ${WITHHELD.size} withheld as noisy, ` +
-        `${MANIFEST_ONLY.size} manifest-only (not run over lockfiles)` +
-        (platform.why.length ? `; skipped as inapplicable: ${platform.why.join(', ')}` : ''),
+      note: notes.join('; '),
     });
     return result;
   },
