@@ -337,6 +337,122 @@ function serviceRoleOnly(p: Policy): boolean {
     predicates.every((e) => /^[\s(]*(?:select\s+)?auth\.role\(\)[\s)]*=\s*'service_role'[\s)]*$/i.test(e));
 }
 
+/* ------------------------------------------------------------------------- *
+ * Does a predicate isolate one user's rows from another's?
+ *
+ * Isolation means comparing the row to *who* the caller is: auth.uid(), a JWT
+ * claim, a request setting, current_user, or a helper function whose body does
+ * one of those. Checks that only establish *that* the caller is signed in —
+ * `auth.role() = 'authenticated'`, `auth.uid() IS NOT NULL`, the JWT's role /
+ * aud / aal / is_anonymous claims — are "gates": they let every signed-in user
+ * through. They are rewritten to marker tokens first, so `auth.uid() IS NOT
+ * NULL AND user_id = auth.uid()` still isolates and `auth.uid() IS NOT NULL`
+ * alone does not.
+ * ------------------------------------------------------------------------- */
+
+const CALLER_REF = /\bauth\s*\.\s*(?:uid|jwt|email)\s*\(\s*\)|\bcurrent_setting\s*\(|\bcurrent_user\b|\bsession_user\b/i;
+const GATE = '__cts_gate__';
+const NEUTRAL = '__cts_role__';
+
+/** `= 'authenticated'` and `<> 'anon'` admit every signed-in user; other role comparisons admit nobody in particular. */
+function roleComparison(op: string, role: string): string {
+  const eq = op === '=';
+  return (eq && role === 'authenticated') || (!eq && role === 'anon') ? GATE : NEUTRAL;
+}
+
+const ROLE_SOURCE =
+  String.raw`(?:\(\s*)?(?:select\s+)?(?:auth\s*\.\s*role\s*\(\s*\)` +
+  String.raw`|\(?\s*auth\s*\.\s*jwt\s*\(\s*\)\s*\)?\s*->>\s*'role'` +
+  String.raw`|current_setting\s*\(\s*'request\.jwt\.claim\.role'[^)]*\)` +
+  String.raw`|current_setting\s*\(\s*'request\.jwt\.claims'[^)]*\)\s*(?:::\s*jsonb?\s*)?->>\s*'role'` +
+  String.raw`|current_user)(?:\s*\))?(?:\s*::\s*text)?`;
+
+function markGates(expr: string): string {
+  return expr
+    .replace(new RegExp(`${ROLE_SOURCE}\\s*(=|<>|!=)\\s*'(\\w+)'(?:\\s*::\\s*text)?`, 'gi'),
+      (_m, op: string, role: string) => roleComparison(op, role.toLowerCase()))
+    .replace(new RegExp(`'(\\w+)'(?:\\s*::\\s*text)?\\s*(=|<>|!=)\\s*${ROLE_SOURCE}`, 'gi'),
+      (_m, role: string, op: string) => roleComparison(op, role.toLowerCase()))
+    .replace(/\bauth\s*\.\s*jwt\s*\(\s*\)\s*\)?\s*->>?\s*'(?:aud|aal|amr|is_anonymous)'/gi, GATE)
+    .replace(/\bauth\s*\.\s*(?:uid|jwt)\s*\(\s*\)(?:\s*\))?\s*is\s+not\s+null/gi, GATE)
+    .replace(/\bauth\s*\.\s*role\s*\(\s*\)/gi, NEUTRAL);
+}
+
+interface CallerFunctions {
+  /** Bare, lower-cased names of functions whose body identifies the caller. */
+  isolating: Set<string>;
+  /** Bare names of functions whose body only checks that the caller is signed in. */
+  gate: Set<string>;
+}
+
+function callsAny(expr: string, names: Set<string>): boolean {
+  for (const name of names) {
+    const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    if (new RegExp(`(?:^|[^\\w$])"?${escaped}"?\\s*\\(`, 'i').test(expr)) return true;
+  }
+  return false;
+}
+
+type Isolation = 'isolating' | 'gate' | 'other';
+
+function classify(expr: string, fns: CallerFunctions): Isolation {
+  const marked = markGates(expr);
+  if (CALLER_REF.test(marked) || callsAny(marked, fns.isolating)) return 'isolating';
+  if (marked.includes(GATE) || callsAny(marked, fns.gate)) return 'gate';
+  return 'other';
+}
+
+/** Classifies every function body; a helper that calls an isolating helper isolates too. */
+function classifyFunctions(bodies: Map<string, string>): CallerFunctions {
+  const fns: CallerFunctions = { isolating: new Set(), gate: new Set() };
+  for (let changed = true; changed;) {
+    changed = false;
+    for (const [name, body] of bodies) {
+      const kind = classify(body, fns);
+      if (kind === 'isolating' && !fns.isolating.has(name)) {
+        fns.isolating.add(name);
+        fns.gate.delete(name);
+        changed = true;
+      } else if (kind === 'gate' && !fns.gate.has(name) && !fns.isolating.has(name)) {
+        fns.gate.add(name);
+        changed = true;
+      }
+    }
+  }
+  return fns;
+}
+
+const COMMANDS = ['SELECT', 'INSERT', 'UPDATE', 'DELETE'] as const;
+type Command = (typeof COMMANDS)[number];
+
+function covers(p: Policy, cmd: Command): boolean {
+  return p.command === 'ALL' || p.command === cmd;
+}
+
+/**
+ * The expression that decides which rows `cmd` reaches under this policy:
+ * USING for SELECT / DELETE / UPDATE (the rows a caller can see or target),
+ * WITH CHECK for INSERT (the rows a caller can create). A FOR ALL policy with
+ * only USING uses it as the check too, as PostgreSQL does.
+ */
+function predicateFor(p: Policy, cmd: Command): string | null {
+  if (cmd === 'INSERT') return p.withCheck ?? p.using;
+  if (cmd === 'UPDATE') return p.using ?? p.withCheck;
+  return p.using;
+}
+
+/** Policies whose roles include signed-in users: `authenticated`, or `public` (every role). */
+function reachesSignedIn(p: Policy): boolean {
+  return p.roles.some((r) => r === 'authenticated' || r === 'public');
+}
+
+const VERBS: Record<Command, string> = {
+  SELECT: 'read',
+  INSERT: 'create rows on behalf of',
+  UPDATE: 'overwrite',
+  DELETE: 'delete',
+};
+
 /** `DROP TABLE [IF EXISTS] a, b [CASCADE | RESTRICT]` → the tables it drops. */
 function droppedTables(flat: string): string[] | null {
   const m = /^drop\s+table\s+(?:if\s+exists\s+)?(.+?)(?:\s+(?:cascade|restrict))?\s*$/i.exec(flat);
@@ -418,6 +534,7 @@ function analyseProject(
     const tables = new Map<string, Table>();
     const policies: Policy[] = [];
     const definerFunctions = new Set<string>();
+    const functionBodies = new Map<string, string>();
     const publicBuckets: { id: string; file: string; line: number }[] = [];
     const findings: Finding[] = [];
 
@@ -571,6 +688,14 @@ function analyseProject(
           continue;
         }
 
+        // Every function body, so a policy calling a helper such as
+        // `is_org_member(org_id)` can be judged by what the helper checks.
+        const fnDecl = new RegExp(`^create\\s+(?:or\\s+replace\\s+)?function\\s+(${QUALIFIED_NAME})`, 'i').exec(flat);
+        if (fnDecl) {
+          const bare = normaliseTable(fnDecl[1]!).split('.').pop()!;
+          functionBodies.set(bare, flat.slice(fnDecl[0].length));
+        }
+
         // SECURITY DEFINER functions without a pinned search_path.
         if (/^create\s+(or\s+replace\s+)?function/i.test(flat) && /security\s+definer/i.test(flat)) {
           const declared = new RegExp(`^create\\s+(?:or\\s+replace\\s+)?function\\s+(${QUALIFIED_NAME})`, 'i').exec(flat)?.[1];
@@ -675,6 +800,11 @@ function analyseProject(
     }
 
     // Pass 2: judge the resulting schema.
+    const callerFns = classifyFunctions(functionBodies);
+    /** `table|command|policy` for each gate policy CTS014 reported, so CTS050 does not repeat it. */
+    const gateLeaks = new Set<string>();
+    /** `table|command|policy` for the scoped policies those gates defeat. */
+    const defeated = new Set<string>();
     const policiesByTable = new Map<string, Policy[]>();
     for (const p of policies) {
       const list = policiesByTable.get(p.table) ?? [];
@@ -738,18 +868,90 @@ function analyseProject(
       const sensitive = table.columns.filter((c) =>
         SENSITIVE_COLUMNS.some((s) => c === s || c.includes(s)),
       );
-      // Tenant isolation means comparing a row to *who* the caller is: auth.uid(),
-      // a JWT claim, or the request claims. `auth.role() = 'authenticated'` only
-      // says the caller is signed in — every signed-in user then sees every
-      // row, which is exactly what CTS014 is about — so it does not count.
+      // Tenant isolation means comparing a row to *who* the caller is (see
+      // classify). `auth.role() = 'authenticated'` or `auth.uid() IS NOT NULL`
+      // only says the caller is signed in — every signed-in user then sees
+      // every row, which is exactly what CTS014 is about — so it does not count.
       const referencesAuth = tablePolicies.some((p) =>
-        /auth\.uid\(\)|auth\.jwt\(\)|current_setting\s*\(/i.test(
-          `${p.using ?? ''} ${p.withCheck ?? ''}`,
-        ),
+        [p.using, p.withCheck].some((e) => e !== null && classify(e, callerFns) === 'isolating'),
       );
       // A policy that only admits the service role reaches no end user (and the
       // service role bypasses RLS anyway), so it cannot leak rows across users.
       const reachesUsers = grantingPolicies.some((p) => !serviceRoleOnly(p));
+
+      if (ownerColumn && referencesAuth) {
+        // Some policy isolates, but PostgreSQL ORs the permissive policies for
+        // each command: one "signed in is enough" policy beside a scoped one
+        // makes the scoping dead code. Judged per command, with FOR ALL
+        // counting towards each; a RESTRICTIVE policy that isolates is AND-ed
+        // on and closes the leak for its commands.
+        //
+        // Only gates count (`auth.role() = 'authenticated'`, `auth.uid() IS
+        // NOT NULL`): a constant `USING (true)` or a row filter such as
+        // `published = true` is an explicit decision to publish, and CTS012 /
+        // CTS013 judge those. A gate on SELECT is reported only beside a scoped
+        // SELECT policy — "members can read every comment" is a common,
+        // deliberate design — while a gate on a write is reported whenever the
+        // table is otherwise per-user: letting every signed-in user overwrite
+        // or delete everyone's rows is not.
+        const leaks = new Map<Policy, { commands: Command[]; scopedBy: Set<string> }>();
+        for (const cmd of COMMANDS) {
+          const restrictiveIsolates = tablePolicies.some((p) => {
+            const e = predicateFor(p, cmd);
+            return !p.permissive && covers(p, cmd) && reachesSignedIn(p) && e !== null &&
+              classify(e, callerFns) === 'isolating';
+          });
+          if (restrictiveIsolates) continue;
+          const reach = grantingPolicies.filter((p) => covers(p, cmd) && reachesSignedIn(p) && !serviceRoleOnly(p));
+          const kind = (p: Policy): Isolation | null => {
+            const e = predicateFor(p, cmd);
+            return e === null ? null : classify(e, callerFns);
+          };
+          const gates = reach.filter((p) => kind(p) === 'gate');
+          if (gates.length === 0) continue;
+          const scoped = reach.filter((p) => kind(p) === 'isolating');
+          if (cmd === 'SELECT' && scoped.length === 0) continue;
+          for (const g of gates) {
+            const entry = leaks.get(g) ?? { commands: [], scopedBy: new Set<string>() };
+            entry.commands.push(cmd);
+            for (const s of scoped) {
+              entry.scopedBy.add(s.name);
+              defeated.add(`${table.name}|${cmd}|${s.name}`);
+            }
+            leaks.set(g, entry);
+            gateLeaks.add(`${table.name}|${cmd}|${g.name}`);
+          }
+        }
+        for (const [g, { commands, scopedBy }] of leaks) {
+          const scopedNames = [...scopedBy];
+          const predicate = (predicateFor(g, commands[0]!) ?? '').replace(/\s+/g, ' ').trim();
+          findings.push({
+            id: 'CTS014',
+            severity: 'high',
+            title: 'A policy lets every signed-in user past a per-user table’s isolation',
+            detail:
+              `Policy \`${g.name}\` on \`${table.name}\` grants ${commands.join(', ')} with ` +
+              `\`${predicate.length > 80 ? `${predicate.slice(0, 77)}...` : predicate}\`, which only checks ` +
+              'that the caller is signed in, not who they are. PostgreSQL ORs permissive policies for ' +
+              'the same command' +
+              (scopedNames.length
+                ? `, so the \`${ownerColumn}\` scoping in ${scopedNames.map((n) => `\`${n}\``).join(', ')} never narrows anything`
+                : '') +
+              `: any authenticated user can ${commands.map((c) => VERBS[c]).join(' / ')} every other user’s rows.`,
+            fix:
+              `Scope \`${g.name}\` to the caller — USING (${ownerColumn} = (SELECT auth.uid()))` +
+              (commands.includes('INSERT') || commands.includes('UPDATE')
+                ? ` WITH CHECK (${ownerColumn} = (SELECT auth.uid()))`
+                : '') +
+              ' — or drop it if the scoped policies already cover what it was for.',
+            file: g.file,
+            line: g.line,
+            cwe: 'CWE-639: Authorization Bypass Through User-Controlled Key',
+            owasp: 'A01:2025 - Broken Access Control',
+            meta: { table: table.name, ownerColumn, policy: g.name, commands, scopedBy: scopedNames },
+          });
+        }
+      }
 
       if (ownerColumn && !referencesAuth && reachesUsers) {
         findings.push({
@@ -866,6 +1068,13 @@ function analyseProject(
       const [table, cmd, role] = key.split('|');
       const names = [...new Set(group.map((p) => p.name))];
       if (names.length < 2) continue;
+      // CTS014 already reported this exact overlap — a gate OR'd onto the
+      // scoped policies it defeats — with the specific consequence. The same
+      // root cause and the same fix; a second, vaguer finding adds nothing.
+      if (
+        names.some((n) => gateLeaks.has(`${table}|${cmd}|${n}`)) &&
+        names.every((n) => gateLeaks.has(`${table}|${cmd}|${n}`) || defeated.has(`${table}|${cmd}|${n}`))
+      ) continue;
       const dedupe = `${table}|${cmd}|${role}|${names.join(',')}`;
       if (alreadyReported.has(dedupe)) continue;
       alreadyReported.add(dedupe);

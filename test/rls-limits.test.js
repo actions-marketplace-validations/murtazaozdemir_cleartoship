@@ -134,3 +134,136 @@ test('Prisma migrations whose migration_lock.toml says sqlite are not Postgres t
   assert.deepEqual(where(pg), ['CTS010 prisma/migrations/20260101_init/migration.sql:public.Session'],
     'a postgresql lock leaves the migration modelled');
 });
+
+// --- 2. CTS014 per command: a gate OR'd onto a scoped policy ----------------
+
+const supa = (lines) => ({ 'package.json': SUPABASE_PKG, 'supabase/migrations/001.sql': lines });
+const ids = (findings) => findings.map((f) => f.id).sort();
+const NOTES = [
+  'create table public.notes (id uuid primary key, user_id uuid not null, body text);',
+  'alter table public.notes enable row level security;',
+];
+
+test("an auth.role() = 'authenticated' policy OR'd with a scoped one is CTS014, and absorbs the CTS050", async () => {
+  const f = await rlsFindings(supa([
+    ...NOTES,
+    'create policy "own notes" on public.notes for all to authenticated using (user_id = (select auth.uid())) with check (user_id = (select auth.uid()));',
+    "create policy \"signed in can read\" on public.notes for select to authenticated using (auth.role() = 'authenticated');",
+  ]));
+  assert.deepEqual(ids(f), ['CTS014'], 'the old rule saw auth.uid() somewhere and passed the table; CTS050 is the same root cause');
+  assert.equal(f[0].meta.policy, 'signed in can read');
+  assert.deepEqual(f[0].meta.commands, ['SELECT']);
+  assert.deepEqual(f[0].meta.scopedBy, ['own notes']);
+});
+
+test('the gate is recognised however it is spelled', async () => {
+  for (const gate of [
+    "(select auth.role()) = 'authenticated'",
+    "'authenticated' = auth.role()",
+    "auth.role() <> 'anon'",
+    "(auth.jwt() ->> 'role') = 'authenticated'",
+    '(select auth.uid()) is not null',
+    "auth.uid() IS NOT NULL AND (auth.jwt() ->> 'aal') = 'aal2'",
+    "current_setting('request.jwt.claim.role', true) = 'authenticated'",
+  ]) {
+    const f = await rlsFindings(supa([
+      ...NOTES,
+      'create policy "own" on public.notes for select using (user_id = auth.uid());',
+      `create policy "gate" on public.notes for select using (${gate});`,
+    ]));
+    assert.deepEqual(ids(f), ['CTS014'], gate);
+  }
+});
+
+test('an isolating RESTRICTIVE policy closes the leak; one on another command does not', async () => {
+  const closed = await rlsFindings(supa([
+    ...NOTES,
+    "create policy \"gate\" on public.notes for all to authenticated using (auth.role() = 'authenticated');",
+    'create policy "owner only" on public.notes as restrictive for all to authenticated using (user_id = auth.uid());',
+  ]));
+  assert.deepEqual(ids(closed), []);
+
+  const partly = await rlsFindings(supa([
+    ...NOTES,
+    "create policy \"gate\" on public.notes for all to authenticated using (auth.role() = 'authenticated');",
+    'create policy "owner reads" on public.notes as restrictive for select to authenticated using (user_id = auth.uid());',
+  ]));
+  assert.deepEqual(ids(partly), ['CTS014']);
+  assert.deepEqual(partly[0].meta.commands, ['INSERT', 'UPDATE', 'DELETE']);
+});
+
+test('a gate on a write is CTS014 even with no scoped policy for that command', async () => {
+  const f = await rlsFindings(supa([
+    ...NOTES,
+    'create policy "read own" on public.notes for select to authenticated using (user_id = auth.uid());',
+    'create policy "insert own" on public.notes for insert to authenticated with check (user_id = auth.uid());',
+    "create policy \"edit\" on public.notes for update to authenticated using (auth.role() = 'authenticated');",
+  ]));
+  assert.deepEqual(ids(f), ['CTS014']);
+  assert.deepEqual(f[0].meta.commands, ['UPDATE']);
+  assert.deepEqual(f[0].meta.scopedBy, []);
+});
+
+test('correct code stays clean: deliberate reads-for-everyone beside owner-scoped writes', async () => {
+  // Members read every comment, write only their own.
+  const members = await rlsFindings(supa([
+    'create table public.comments (id uuid primary key, user_id uuid not null, body text);',
+    'alter table public.comments enable row level security;',
+    "create policy \"members read\" on public.comments for select using (auth.role() = 'authenticated');",
+    'create policy "write own" on public.comments for insert to authenticated with check (user_id = auth.uid());',
+    'create policy "delete own" on public.comments for delete to authenticated using (user_id = auth.uid());',
+  ]));
+  assert.deepEqual(ids(members), []);
+
+  // The Supabase tutorial shape: public read, owner manages. An explicit publication, not a gate.
+  const posts = await rlsFindings(supa([
+    'create table public.posts (id uuid primary key, user_id uuid not null, title text);',
+    'alter table public.posts enable row level security;',
+    'create policy "anyone reads" on public.posts for select using (true);',
+    'create policy "own posts" on public.posts for all to authenticated using (auth.uid() = user_id);',
+  ]));
+  assert.deepEqual(ids(posts), []);
+
+  // Signed-in check AND ownership still isolates; the service-role escape hatch reaches no user.
+  const combined = await rlsFindings(supa([
+    ...NOTES,
+    'create policy "own" on public.notes for all using (auth.uid() is not null and user_id = auth.uid());',
+    "create policy \"service\" on public.notes for all using ((select auth.role()) = 'service_role');",
+  ]));
+  // (Two FOR ALL policies for `public` still overlap: that CTS050 is unchanged and beside the point.)
+  assert.deepEqual(ids(combined).filter((id) => id !== 'CTS050'), []);
+});
+
+test('auth.uid() IS NOT NULL alone is not isolation: the whole-table CTS014 fires', async () => {
+  const f = await rlsFindings(supa([
+    ...NOTES,
+    'create policy "signed in" on public.notes for select to authenticated using (auth.uid() is not null);',
+  ]));
+  assert.deepEqual(ids(f), ['CTS014'], 'the old rule counted any mention of auth.uid() as isolation');
+});
+
+test('membership subqueries and helper functions that read auth.uid() isolate', async () => {
+  const helper = await rlsFindings(supa([
+    'create table public.members (org_id uuid, user_id uuid);',
+    'alter table public.members enable row level security;',
+    'create policy "self" on public.members for select using (user_id = auth.uid());',
+    'create table public.docs (id uuid primary key, org_id uuid not null, body text);',
+    'alter table public.docs enable row level security;',
+    "create or replace function public.is_member(o uuid) returns boolean language sql security definer set search_path = '' as $$",
+    '  select exists (select 1 from public.members m where m.org_id = o and m.user_id = auth.uid())',
+    '$$;',
+    'create or replace function public.can_read(o uuid) returns boolean language sql as $$ select public.is_member(o) $$;',
+    'create policy "org read" on public.docs for select to authenticated using (public.can_read(org_id));',
+    'create policy "org write" on public.docs for insert to authenticated with check (org_id in (select org_id from public.members where user_id = auth.uid()));',
+  ]));
+  assert.deepEqual(ids(helper), [], 'a helper, even one calling another helper, isolates by what its body checks');
+
+  const gateHelper = await rlsFindings(supa([
+    ...NOTES,
+    'create function public.signed_in() returns boolean language sql as $$ select auth.uid() is not null $$;',
+    'create policy "own" on public.notes for select to authenticated using (user_id = auth.uid());',
+    'create policy "anyone signed in edits" on public.notes for delete to authenticated using (public.signed_in());',
+  ]));
+  assert.deepEqual(ids(gateHelper), ['CTS014']);
+  assert.deepEqual(gateHelper[0].meta.commands, ['DELETE']);
+});
