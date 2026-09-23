@@ -15,3 +15,17 @@ export function shannonEntropy(value: string): number {
   }
   return entropy;
 }
+
+/**
+ * How a credential is shown in a report: enough of each end to recognise which
+ * key it is, never enough to use it. Every finding that quotes a secret-shaped
+ * value — in its detail or in its snippet — goes through this one function, so
+ * no rule prints more of a key than another does. A report is pasted into pull
+ * requests, CI logs and chat; the full value must never reach one.
+ */
+export function redactCredential(value: string): string {
+  if (value.length > 14) return `${value.slice(0, 8)}…${value.slice(-4)}`;
+  // Short enough that showing the ends would show most of it.
+  if (value.length > 6) return `${value.slice(0, 2)}…`;
+  return value;
+}
