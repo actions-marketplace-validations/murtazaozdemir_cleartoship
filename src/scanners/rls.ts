@@ -7,6 +7,163 @@ import {
 // reaching it directly cannot introduce an initialisation-order cycle.
 import { readBalanced } from '../utils/sql.js';
 import type { Finding, ProjectContext, ScanResult, Scanner, Severity } from '../internal.js';
+import { existsSync } from 'node:fs';
+import { dirname, join, relative, resolve, isAbsolute } from 'node:path';
+
+/* ------------------------------------------------------------------------- *
+ * Which .sql files are PostgreSQL at all.
+ *
+ * `ctx.framework.supabase` is a repo-wide flag, so one Supabase package in a
+ * monorepo used to make every .sql file in it — a Cloudflare D1 (SQLite)
+ * migration included — read as a Supabase table with RLS off. Each file is
+ * now judged on its own. A file is *excluded* only on positive evidence that
+ * it is not Postgres; without that evidence the old behaviour stands, because
+ * dropping a Postgres file on a guess is a clean report on unread code.
+ * ------------------------------------------------------------------------- */
+
+/** RLS / Supabase-auth idioms: a file carrying these is Postgres, whatever else is true. */
+const PG_RLS_IDIOMS =
+  /\brow\s+level\s+security\b|\bauth\.(uid|jwt|role)\s*\(|\bto\s+(anon|authenticated)\b|\bcreate\s+policy\b/i;
+
+/**
+ * SQLite-only syntax. Each of these is a syntax error or an unknown function
+ * in PostgreSQL, so one of them is real evidence — unlike `INTEGER PRIMARY
+ * KEY` or `TEXT`, which both dialects accept.
+ */
+const SQLITE_ONLY =
+  /\bautoincrement\b|\bunixepoch\s*\(|\bwithout\s+rowid\b|^\s*pragma\s+\w|\bstrftime\s*\(|\bdatetime\s*\(\s*'now'/im;
+
+/** Postgres-only syntax; any of it vetoes the SQLite reading. */
+const POSTGRES_ONLY =
+  /\b(uuid|jsonb|timestamptz|bigserial|serial|gen_random_uuid|plpgsql|security\s+definer)\b|\bcreate\s+(extension|schema|type)\b|\$\$|\bauth\s*\.\s*users\b/i;
+
+const WRANGLER_CONFIGS = ['wrangler.toml', 'wrangler.json', 'wrangler.jsonc'];
+
+function isWithin(dir: string, file: string): boolean {
+  const r = relative(dir, file);
+  return r !== '' && !r.startsWith('..') && !isAbsolute(r);
+}
+
+/** Directories from `start` up to and including `root` (start must be inside root). */
+function ancestors(start: string, root: string): string[] {
+  const out: string[] = [];
+  let dir = start;
+  for (;;) {
+    out.push(dir);
+    if (dir === root || !isWithin(root, dir)) break;
+    const parent = dirname(dir);
+    if (parent === dir) break;
+    dir = parent;
+  }
+  return out;
+}
+
+function dependsOnSupabase(pkg: any): boolean {
+  for (const field of ['dependencies', 'devDependencies', 'peerDependencies']) {
+    const deps = pkg?.[field];
+    if (deps && typeof deps === 'object' && Object.keys(deps).some((d) => d === 'supabase' || d.startsWith('@supabase/'))) {
+      return true;
+    }
+  }
+  return false;
+}
+
+interface DialectModel {
+  /** Absolute dirs holding a wrangler config that declares D1 databases. */
+  d1ConfigDirs: Set<string>;
+  /** Absolute D1 `migrations_dir` paths, resolved against their config. */
+  d1MigrationDirs: Set<string>;
+  /** Directory → whether its nearest package.json depends on Supabase (null: none found). */
+  pkgCache: Map<string, boolean | null>;
+}
+
+function buildDialectModel(ctx: ProjectContext): DialectModel {
+  const d1ConfigDirs = new Set<string>();
+  const d1MigrationDirs = new Set<string>();
+  // Every directory the scan touched and its ancestors: that is where a
+  // wrangler config next to (or above) a migration, or one pointing at it
+  // through `migrations_dir`, can live. `.jsonc` is not a scanned extension,
+  // so configs are looked up on disk rather than taken from ctx.files.
+  const dirs = new Set<string>();
+  for (const f of ctx.files) for (const d of ancestors(dirname(f), ctx.root)) dirs.add(d);
+  for (const dir of dirs) {
+    for (const name of WRANGLER_CONFIGS) {
+      const path = join(dir, name);
+      if (!existsSync(path)) continue;
+      const src = read(path);
+      if (!src || !/\bd1_databases\b/.test(src)) continue;
+      d1ConfigDirs.add(dir);
+      const declared = [...src.matchAll(/["']?migrations_dir["']?\s*[:=]\s*["']([^"']+)["']/g)].map((m) => m[1]!);
+      for (const m of declared.length ? declared : ['migrations']) d1MigrationDirs.add(resolve(dir, m));
+    }
+  }
+  return { d1ConfigDirs, d1MigrationDirs, pkgCache: new Map() };
+}
+
+function nearestPackageSupabase(model: DialectModel, file: string, root: string): boolean | null {
+  const chain = ancestors(dirname(file), root);
+  let answer: boolean | null = null;
+  let resolvedAt = chain.length;
+  for (let i = 0; i < chain.length; i++) {
+    const cached = model.pkgCache.get(chain[i]!);
+    if (cached !== undefined) { answer = cached; resolvedAt = i; break; }
+    const raw = read(join(chain[i]!, 'package.json'));
+    if (raw === null) continue;
+    try {
+      answer = dependsOnSupabase(JSON.parse(raw));
+    } catch {
+      answer = null;
+    }
+    resolvedAt = i;
+    break;
+  }
+  for (let i = 0; i <= Math.min(resolvedAt, chain.length - 1); i++) model.pkgCache.set(chain[i]!, answer);
+  return answer;
+}
+
+const dialectCache = new WeakMap<ProjectContext, string[]>();
+
+/**
+ * The .sql files this scanner should model as PostgreSQL.
+ *
+ * Excluded (not Postgres) — only when the file is not under a `supabase/`
+ * directory and carries no RLS / Supabase-auth idiom, and then either:
+ *   - it sits in a D1 `migrations_dir`, or under a directory whose wrangler
+ *     config declares `d1_databases` while its nearest package.json does not
+ *     depend on Supabase; or
+ *   - it uses SQLite-only syntax (AUTOINCREMENT, unixepoch(), …) and no
+ *     Postgres-only syntax.
+ * Included — everything else, provided something says Postgres/Supabase: the
+ * file is under `supabase/`, its nearest package.json depends on Supabase, or
+ * the repo-wide signals (the root dependency set, a root `supabase/` dir, RLS
+ * idioms in any remaining SQL file) hold.
+ */
+function postgresSqlFiles(ctx: ProjectContext): string[] {
+  const cached = dialectCache.get(ctx);
+  if (cached) return cached;
+  const sql = ctx.files.filter(isSql);
+  if (sql.length === 0) { dialectCache.set(ctx, []); return []; }
+
+  const model = buildDialectModel(ctx);
+  const candidates: { file: string; src: string; perFile: boolean }[] = [];
+  for (const file of sql) {
+    const src = read(file) ?? '';
+    const underSupabase = rel(ctx.root, file).split('/').slice(0, -1).includes('supabase');
+    const idioms = PG_RLS_IDIOMS.test(src);
+    const pkgSupabase = nearestPackageSupabase(model, file, ctx.root) === true;
+    if (!underSupabase && !idioms) {
+      const inMigrationsDir = [...model.d1MigrationDirs].some((d) => isWithin(d, file));
+      const underD1Worker = !pkgSupabase && [...model.d1ConfigDirs].some((d) => isWithin(d, file));
+      const sqliteDialect = SQLITE_ONLY.test(src) && !POSTGRES_ONLY.test(src);
+      if (inMigrationsDir || underD1Worker || sqliteDialect) continue;
+    }
+    candidates.push({ file, src, perFile: underSupabase || idioms || pkgSupabase });
+  }
+  const repoSignal = ctx.framework.supabase || candidates.some((c) => PG_RLS_IDIOMS.test(c.src));
+  const out = candidates.filter((c) => repoSignal || c.perFile).map((c) => c.file);
+  dialectCache.set(ctx, out);
+  return out;
+}
 
 const OWNER_COLUMNS = [
   'user_id', 'owner_id', 'tenant_id', 'org_id', 'organization_id', 'account_id',
@@ -132,22 +289,12 @@ export const rlsScanner: Scanner = {
   name: 'Supabase / PostgreSQL Row Level Security',
 
   applies(ctx) {
-    if (!ctx.files.some(isSql)) return false;
     // Row Level Security is a PostgreSQL feature that Supabase builds on. This
     // scanner must not fire on SQLite / Cloudflare D1 / Prisma-sqlite schemas,
     // which have no RLS concept at all — doing so turns every CREATE TABLE into
-    // a false "RLS disabled" critical. Require a genuine Postgres/Supabase
-    // signal: the dependency set, a supabase/ directory, or RLS/auth idioms in
-    // the SQL itself.
-    if (ctx.framework.supabase) return true;
-    for (const file of ctx.files) {
-      if (!isSql(file)) continue;
-      const src = read(file);
-      if (src && /\brow\s+level\s+security\b|\bauth\.(uid|jwt|role)\s*\(|\bto\s+(anon|authenticated)\b|\bcreate\s+policy\b/i.test(src)) {
-        return true;
-      }
-    }
-    return false;
+    // a false "RLS disabled" critical. See postgresSqlFiles for how each file
+    // is judged.
+    return postgresSqlFiles(ctx).length > 0;
   },
 
   async run(ctx): Promise<ScanResult> {
@@ -160,7 +307,7 @@ export const rlsScanner: Scanner = {
     const suppressors = new Map<string, Suppressions>();
     const sources = new Map<string, string>();
 
-    const sqlFiles = ctx.files.filter(isSql).sort();
+    const sqlFiles = [...postgresSqlFiles(ctx)].sort();
 
     // Pass 1: build a model of the schema by replaying every migration in order.
     for (const file of sqlFiles) {

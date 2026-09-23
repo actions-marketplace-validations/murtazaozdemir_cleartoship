@@ -172,3 +172,80 @@ test('DROP TABLE drops every table in its list, with IF EXISTS and CASCADE', asy
   ]));
   assert.deepEqual(f.filter((x) => x.id === 'CTS010').map((x) => x.meta.table), ['public.c']);
 });
+
+// --- Which .sql files are Postgres at all -----------------------------------
+
+const D1_TABLE = [
+  'CREATE TABLE IF NOT EXISTS licenses (',
+  '  jti TEXT PRIMARY KEY,',
+  '  email TEXT NOT NULL,',
+  '  created_at INTEGER NOT NULL DEFAULT (unixepoch())',
+  ');',
+];
+const D1_PLAIN = ['CREATE TABLE licenses (jti TEXT PRIMARY KEY, email TEXT NOT NULL);'];
+const tablesOf = (findings) => findings.filter((f) => f.id === 'CTS010').map((f) => `${f.file}:${f.meta.table}`).sort();
+
+test('a Cloudflare D1 migration in a Supabase repo is not a Supabase table (wrangler.jsonc d1_databases)', async () => {
+  const f = await rlsFindings({
+    'package.json': SUPABASE_PKG,
+    'supabase/migrations/001.sql': 'create table public.unprotected (id uuid primary key);',
+    'site/package.json': JSON.stringify({ name: 'site', dependencies: { wrangler: '4.0.0' } }),
+    'site/wrangler.jsonc': '{\n  // comment\n  "d1_databases": [{ "binding": "DB", "migrations_dir": "migrations" }]\n}',
+    'site/migrations/0001_licenses.sql': D1_PLAIN,
+  });
+  assert.deepEqual(tablesOf(f), ['supabase/migrations/001.sql:public.unprotected'],
+    'the D1 table is skipped, the real Supabase table is still reported');
+});
+
+test('a D1 migrations_dir outside the worker directory is recognised (wrangler.toml)', async () => {
+  const f = await rlsFindings({
+    'package.json': SUPABASE_PKG,
+    'worker/wrangler.toml': '[[d1_databases]]\nbinding = "DB"\nmigrations_dir = "../db/d1"\n',
+    'db/d1/0001.sql': D1_PLAIN,
+    'db/pg/0001.sql': 'create table public.accounts (id uuid primary key);',
+  });
+  assert.deepEqual(tablesOf(f), ['db/pg/0001.sql:public.accounts']);
+});
+
+test('SQL under supabase/, or carrying RLS idioms, is Postgres even inside a D1 worker tree', async () => {
+  const f = await rlsFindings({
+    'package.json': JSON.stringify({ name: 'worker' }),
+    'wrangler.toml': '[[d1_databases]]\nbinding = "DB"\n',
+    'supabase/migrations/001.sql': 'create table public.a (id uuid primary key);',
+    'sql/policies.sql': [
+      'create table public.b (id uuid primary key);',
+      'create policy "p" on public.b for select to anon using (true);',
+    ],
+    'sql/d1.sql': D1_PLAIN,
+  });
+  assert.deepEqual(tablesOf(f), ['sql/policies.sql:public.b', 'supabase/migrations/001.sql:public.a']);
+});
+
+test('SQLite-only syntax outside supabase/ is not modelled as Postgres; plain SQL still is', async () => {
+  const f = await rlsFindings({
+    'package.json': SUPABASE_PKG,
+    'db/sqlite.sql': 'CREATE TABLE cache (id INTEGER PRIMARY KEY AUTOINCREMENT, v TEXT);',
+    'db/local.sql': D1_TABLE,
+    'db/plain.sql': 'create table events (id integer primary key, kind text);',
+    'db/mixed.sql': "create table things (id uuid primary key, at text default (datetime('now')));",
+  });
+  assert.deepEqual(tablesOf(f), ['db/mixed.sql:public.things', 'db/plain.sql:public.events'],
+    'SQLite markers exclude a file only when nothing Postgres-only is in it');
+});
+
+test("a package that depends on Supabase makes its SQL relevant even when the root doesn't", async () => {
+  const f = await rlsFindings({
+    'package.json': JSON.stringify({ name: 'mono', private: true }),
+    'packages/db/package.json': SUPABASE_PKG,
+    'packages/db/sql/schema.sql': 'create table public.profiles (id uuid primary key, email text);',
+  });
+  assert.deepEqual(tablesOf(f), ['packages/db/sql/schema.sql:public.profiles']);
+});
+
+test('without any Postgres signal, SQL is still left alone', async () => {
+  const f = await rlsFindings({
+    'package.json': JSON.stringify({ name: 'x' }),
+    'schema.sql': 'create table notes (id integer primary key, body text);',
+  });
+  assert.deepEqual(f, []);
+});
