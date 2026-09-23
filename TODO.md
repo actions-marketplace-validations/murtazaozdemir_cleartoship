@@ -3,13 +3,13 @@
 Public backlog. Working notes, positioning and anything about other projects
 live in `NOTES.private.md`, which is gitignored and stays on my machine.
 
-_Current release: **v0.13.10** — trims `action.yml`'s description under the GitHub
-Marketplace's 125-character limit, which was blocking the Marketplace listing;
-[the Action is now live there](https://github.com/marketplace/actions/cleartoship)
-(2026-09-22), under Security / Code Scanning Ready. The first fix for the limit
-broke `action.yml` outright — an unquoted colon in the trimmed description reads
-as a YAML mapping key, and the `Action integration test` workflow caught it within
-a minute, before it reached a tag. Every check is in the one free download,
+_Current release: **v0.13.12** — fixes a sticky-PR-comment regression in
+0.13.11's Action (a new comment on every run). **v0.13.11** shipped the
+2026-09-23 audit: incomplete scans exit 3, tracked files can no longer be hidden
+by `.gitignore`, and it is the first release with build-provenance attestations,
+which the Action verifies before it runs a downloaded bundle.
+[The Action is on the GitHub Marketplace](https://github.com/marketplace/actions/cleartoship)
+(since 2026-09-22), under Security / Code Scanning Ready. Every check is in the one free download,
 including the RLS, Server Actions and LLM/agent suites, as of v0.13.9.
 (They were split into a private package for v0.13.6–0.13.8, which left them in no
 downloadable build; v0.13.8 also closed a hole where a scan would run a package of
@@ -114,7 +114,7 @@ Marketplace's limit. The first attempted fix broke `action.yml` outright (an
 unquoted colon reads as a YAML mapping key); the `Action integration test`
 workflow caught it within a minute, before it reached a tag.
 
-**The 2026-09-23 full audit (unreleased; on branch `audit-fixes`) found the
+**The 2026-09-23 full audit (shipped as 0.13.11) found the
 worst failure class this project exists to prevent — "clear" on code it never
 read — in eight separate places, in this tool itself.** A committed `.gitignore`
 could hide a tracked file (a PR adds `app/backdoor.ts` to `.gitignore` and the
@@ -157,17 +157,29 @@ bug of the pass — the comment lexer did not know regex literals, so a backtick
 in `/`\s*,/` opened a phantom template string in `community.ts` and VG105
 fired on a sentence a hundred lines later.
 
+**Shipping 0.13.11 was its own lesson in the rule the release skill opens
+with.** Every run was green, and the release still had nothing on it as far as
+two consumers could tell: for about two minutes after the draft was published,
+GitHub served the release's embedded asset list empty while the assets endpoint
+and the download URLs already had all three files. The site redeploy that
+release.yml dispatches landed inside that window, failed with "no assets to
+download", and left cleartoship.app on 0.13.10; the release job's own verify
+step read the same list and passed only by timing. Both now read the assets
+endpoint or the download URL, with retries (90a8d96), and a redeploy was
+checked by hash against the attested asset, not by exit code. Then the Action
+integration test on an open Dependabot PR found a second 0.13.11 bug: the sticky
+PR comment's author lookup ran `me=$(gh api user --jq .login || true)`, and on
+an HTTP error `gh api` prints the error body to stdout, `--jq` or not — so the
+default token's 403 left `me` holding a JSON blob, no comment matched, and every
+run posted a new one. 0.13.12 tests the exit status instead. The test that
+caught it asserts exactly one comment, which is the assertion that could fail.
+
 ## Open
 
-- [ ] **Ship the audit fixes.** Merge `audit-fixes` to `main`, bump to 0.13.11
-      and release — the first release with build-provenance attestations. Until
-      0.13.11 exists, README and `examples/security-cli.yml` show `gh attestation
-      verify` against v0.13.10, which has no attestation and fails; the Action
-      handles pre-attestation versions by building its own checkout.
-      Maintainer-only, not doable from the repo: **enable immutable releases**
-      (release.yml already publishes via a draft, so it is compatible), **delete
-      the dead `NPM_TOKEN` secret**, and add a **Cloudflare rate-limit rule** on
-      `/license/*` and `/webhooks/*`.
+- [ ] **Maintainer-only settings the audit turned up** (not doable from the
+      repo): **enable immutable releases** (release.yml publishes via a draft,
+      so it is compatible), **delete the dead `NPM_TOKEN` secret**, and add a
+      **Cloudflare rate-limit rule** on `/license/*` and `/webhooks/*`.
 - [ ] **Known limits left by the audit, on purpose.** A whole-repo scan builds
       one SQL schema from every `.sql` file, so separate projects' migrations
       mix (visible on this repo's own fixtures). CTS014 still counts a table

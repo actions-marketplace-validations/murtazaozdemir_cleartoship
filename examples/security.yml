@@ -35,7 +35,7 @@ jobs:
           node-version: 22
       # The Action verifies the release bundle's build-provenance attestation
       # before running it, and fails rather than run one that does not verify.
-      - uses: murtazaozdemir/cleartoship@v0.13.11
+      - uses: murtazaozdemir/cleartoship@v0.13.12
         with:
           fail-on: critical   # block the PR only on criticals
           comment: true        # post a summary comment on the PR

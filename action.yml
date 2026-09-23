@@ -347,8 +347,13 @@ runs:
         # default GITHUB_TOKEN cannot call /user, so it falls back to the bot
         # login it posts as; a personal token answers with its own login.
         # Paginated, because on a long thread the first page need not hold it.
-        me=$(gh api user --jq .login 2>/dev/null || true)
-        [ -n "$me" ] || me="github-actions[bot]"
+        # Test the exit status, not the output: on an HTTP error `gh api` still
+        # prints the error body to stdout, `--jq` or not, so 0.13.11's
+        # `me=$(… || true)` held a JSON blob, matched no comment, and posted a
+        # new one on every run.
+        if ! me=$(gh api user --jq .login 2>/dev/null) || [ -z "$me" ] || [ "${me#\{}" != "$me" ]; then
+          me="github-actions[bot]"
+        fi
         id=$(gh api --paginate "repos/${REPO}/issues/${PR}/comments" \
               --jq ".[] | select(.user.login == \"${me}\" and (.body | startswith(\"${marker}\"))) | .id" \
               2>/dev/null | head -n 1 || true)

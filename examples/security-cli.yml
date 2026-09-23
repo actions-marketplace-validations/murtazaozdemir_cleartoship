@@ -38,7 +38,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          curl -fsSL https://github.com/murtazaozdemir/cleartoship/releases/download/v0.13.11/cleartoship.mjs -o cleartoship.mjs
+          curl -fsSL https://github.com/murtazaozdemir/cleartoship/releases/download/v0.13.12/cleartoship.mjs -o cleartoship.mjs
           gh attestation verify cleartoship.mjs --repo murtazaozdemir/cleartoship
 
       # Write the report for the Security tab, and don't fail on this step —
