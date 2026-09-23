@@ -194,10 +194,14 @@ test('ReDoS: the overridden rules are linear on their own trigger repeated', () 
   }
 });
 
-test('ReDoS safety net: a super-linear rule on a large file is stopped and reported, the rest still run', async () => {
+test('VG061 on its own trigger repeated over 1 MB no longer needs the safety net', async () => {
+  // This input used to make VG061 quadratic, so the budget stopped it and the
+  // run was incomplete. Vendored patterns V8 backtracks on now run on the
+  // linear-time matcher, so it finishes and nothing is left unread. The budget
+  // itself is tested with a deliberately super-linear pattern in
+  // redos-overrides.test.js.
   const root = project({
     'package.json': '{"name":"r"}',
-    // VG061's pattern is quadratic on its own trigger repeated.
     'lib/adv.ts': 'jwt.sign('.repeat(Math.floor(1_000_000 / 9)) + '\nexport function run(code: string) { return eval(code) }\n',
   });
   const t = Date.now();
@@ -205,8 +209,8 @@ test('ReDoS safety net: a super-linear rule on a large file is stopped and repor
   assert.ok(Date.now() - t < 60_000, `took ${Date.now() - t} ms`);
   assert.equal(byId(result, 'VG014').length, 1, 'the other rules still read the whole file');
   assert.ok(
-    result.incomplete.some((r) => /^VG061 .*lib\/adv\.ts/.test(r)),
-    `the stopped rule is reported: ${JSON.stringify(result.incomplete)}`,
+    !result.incomplete.some((r) => /^VG061 /.test(r)),
+    `VG061 finished: ${JSON.stringify(result.incomplete)}`,
   );
 });
 

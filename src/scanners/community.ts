@@ -1207,6 +1207,8 @@ function compilePattern(ast: ReNode, flags: string): { prog: Ins[]; start: numbe
       case 'assert':
         return emit({ op: ASSERT, kind: n.kind, next });
       case 'look':
+        // cleartoship-ignore VG126: `n.raw` is a slice of a vendored rule's own
+        // pattern, compiled once per rule — never text from a scanned repo.
         if (n.behind) return emit({ op: LOOK, re: new RegExp(n.raw, cflags + 'y'), next });
         if (evaluatesLinearly(n.body, sflags)) return emit({ op: LOOK, re: sticky(n.body), neg: n.neg, next });
         return emit({ op: LOOK, sub: c(n.body, match, PATTERN_END), neg: n.neg, next });
@@ -1433,6 +1435,8 @@ export class LinearMatcher implements Matcher {
   private gen = 0;
   private shared = new Map<string, Positions>();
   private requiredAt = -1;
+  /** Where the previous search on this text started; see exec(). */
+  private lastFrom = -1;
   // Indexed by instruction: failed (state, position) pairs, candidate sets,
   // lookahead verdicts, forbidden-word verdicts, run ends.
   private memo: (Uint8Array | undefined)[] = [];
@@ -1524,6 +1528,8 @@ export class LinearMatcher implements Matcher {
   private positions(key: string, source: string, flags: string): Positions {
     let p = this.shared.get(key);
     if (p === undefined) {
+      // cleartoship-ignore VG126: `source` is derived from a vendored rule's
+      // pattern, not from the scanned text it is run over.
       p = new Positions(new RegExp(source, flags), this.text!);
       this.shared.set(key, p);
     }
@@ -1786,9 +1792,15 @@ export class LinearMatcher implements Matcher {
   }
 
   exec(text: string): RegExpExecArray | null {
-    if (text !== this.text) this.reset(text);
-    const n = this.n;
     let from = this.global ? this.lastIndex : 0;
+    // The per-text tables assume searches move forward. Searching the same
+    // text again from an earlier position — a second file with identical
+    // content, or the same file in a later scan in one process — used to reuse
+    // `requiredAt` from the finished search, which said nothing was left, so
+    // every match was lost. Start over whenever the search moves backwards.
+    if (text !== this.text || from < this.lastFrom) this.reset(text);
+    this.lastFrom = from;
+    const n = this.n;
     for (;;) {
       if (from > n) break;
       // Nothing from here on holds the text every match must: no match.
