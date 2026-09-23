@@ -44,7 +44,7 @@ const UNSAFE_DESERIALIZE = [
 /**
  * Function names that signal the body is making a security decision.
  *
- * `ensure` used to count on its own, so `ensureDir() { try { mkdirSync(…) }
+ * `ensure` used to count on its own, so `ensureDir() { try { mkdirSync … }
  * catch {} }` — the idiomatic "create it unless it exists" — was reported as a
  * security check swallowing its error. `ensure` is a security word only when
  * what it ensures is one.

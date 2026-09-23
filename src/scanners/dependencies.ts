@@ -264,8 +264,15 @@ function collectFromProse(rawSource: string, relPath: string): Declared[] {
       }
       const line = lineAt(source, m.index);
       let skipNext = false;
+      let inPlaceholder = false;
       for (const raw of args) {
         if (skipNext) { skipNext = false; continue; } // the value of the previous flag
+        // `npm install <its own name>` is a placeholder written in words, not three
+        // packages: this project's own TODO.md got a CTS022 for a package `own`.
+        if (inPlaceholder || raw.startsWith('<')) {
+          inPlaceholder = !/>[.,;:!?)`]*$/.test(raw);
+          continue;
+        }
         if (raw.startsWith('-')) {
           if (!raw.includes('=') && FLAGS_WITH_VALUE.has(raw)) skipNext = true;
           continue; // flag

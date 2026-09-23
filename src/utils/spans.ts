@@ -26,6 +26,14 @@ export interface CommentStyle {
   hash: boolean;
   /** `--` line comments: SQL. */
   dashes: boolean;
+  /**
+   * `/…/` regex literals: JavaScript and TypeScript. A quote or backtick inside
+   * one is not a string opening, and before this was tracked a single
+   * `/\`\s*,/` in this repo's own community.ts opened a phantom template
+   * literal that swallowed the next hundred lines, so every comment in them read
+   * as code and a vendored rule fired on a sentence.
+   */
+  regex?: boolean;
 }
 
 export function commentStyleFor(languages: readonly string[]): CommentStyle {
@@ -41,6 +49,7 @@ export function commentStyleFor(languages: readonly string[]): CommentStyle {
       has('terraform') ||
       has('dockerfile'),
     dashes: has('sql'),
+    regex: has('javascript') || has('typescript'),
   };
 }
 
@@ -78,6 +87,14 @@ export function lexSpans(source: string, style: CommentStyle): Span[] {
 
     const two = source.slice(i, i + 2);
 
+    if (style.regex && ch === '/' && two !== '//' && two !== '/*' && regexCanStart(source, i)) {
+      const end = regexEnd(source, i);
+      if (end !== -1) {
+        i = end; // code, not a string or a comment: nothing to record
+        continue;
+      }
+    }
+
     if (style.slashes && two === '/*') {
       const end = source.indexOf('*/', i + 2);
       const close = end === -1 ? source.length - 1 : end + 1;
@@ -100,6 +117,45 @@ export function lexSpans(source: string, style: CommentStyle): Span[] {
   }
 
   return spans;
+}
+
+/** Keywords after which a `/` starts a regex rather than dividing. */
+const REGEX_AFTER_WORD = /\b(?:return|typeof|instanceof|in|of|new|delete|void|throw|case|do|else|yield|await)$/;
+
+/**
+ * Whether a `/` at `index` can open a regex literal: the previous significant
+ * character is an operator or opening punctuation, or a keyword like `return`.
+ * After an identifier, a number or a closing bracket it is division.
+ */
+function regexCanStart(source: string, index: number): boolean {
+  let j = index - 1;
+  while (j >= 0 && (source[j] === ' ' || source[j] === '\t' || source[j] === '\n' || source[j] === '\r')) j--;
+  if (j < 0) return true;
+  const prev = source[j]!;
+  if ('(,=:[!&|?{};+-*%~^'.includes(prev)) return true; // not < or >: `</div>` is JSX
+  return REGEX_AFTER_WORD.test(source.slice(Math.max(0, j - 10), j + 1));
+}
+
+/**
+ * Index of the closing `/` of a regex literal opened at `start`, honouring
+ * escapes and `[...]` classes, or -1 if the line ends first — then it was not a
+ * regex after all, and the caller carries on as before.
+ */
+function regexEnd(source: string, start: number): number {
+  let inClass = false;
+  for (let i = start + 1; i < source.length; i++) {
+    const c = source[i]!;
+    if (c === '\n') return -1;
+    if (c === '\\') {
+      i++;
+      continue;
+    }
+    if (inClass) {
+      if (c === ']') inClass = false;
+    } else if (c === '[') inClass = true;
+    else if (c === '/') return i;
+  }
+  return -1;
 }
 
 /** Binary search: is `index` inside a span of this kind? */
