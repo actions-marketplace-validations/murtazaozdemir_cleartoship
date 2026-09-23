@@ -122,7 +122,23 @@ export async function scan(options: ScanOptions): Promise<FullScan> {
         ]
       : [];
   const warnings: string[] = [...missingRootNotes, ...walkWarnings, ...unreadableNotes];
-  const incomplete: string[] = [...missingRootNotes, ...unreadableNotes];
+  // A source file over the size cap was opened by nothing either. It used to
+  // get only a passing "too large to read" line, and the run came out clear:
+  // pad a file past 2 MB and whatever is in it is never looked at.
+  const oversizeFiles = [...new Set(walked.flatMap((w) => w.oversizeFiles))]
+    .map((p) => rel(root, p))
+    .sort();
+  const oversizeNotes =
+    oversizeFiles.length > 0
+      ? [
+          `${oversizeFiles.length} file${oversizeFiles.length === 1 ? ' is' : 's are'} over the 2 MB ` +
+            `read cap and ${oversizeFiles.length === 1 ? 'was' : 'were'} NOT scanned: ` +
+            oversizeFiles.slice(0, 5).join(', ') +
+            (oversizeFiles.length > 5 ? `, and ${oversizeFiles.length - 5} more` : ''),
+        ]
+      : [];
+  warnings.push(...oversizeNotes);
+  const incomplete: string[] = [...missingRootNotes, ...unreadableNotes, ...oversizeNotes];
 
   takeParseFailures(files); // start from a clean slate for these files
   for (let i = 0; i < activeAll.length; i++) {

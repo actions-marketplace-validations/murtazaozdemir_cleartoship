@@ -478,3 +478,32 @@ test('the CLI renders a PR comment from a hostile package.json without live mark
   assert.ok(existsSync(root));
   assert.ok(!/!\[p\]\(/.test(r.stdout));
 });
+
+// --- oversize files are not checked, so the run is not clear ----------------
+
+test('a source file over the 2 MB cap makes the run incomplete and names it', async () => {
+  const root = project({
+    'app/small.ts': 'export const a = 1;\n',
+    'app/huge.ts': `// ${'x'.repeat(2_100_000)}\n`,
+  });
+  const result = await scan({ root, offline: true, noCommunity: true });
+  assert.equal(result.oversizeCount, 1);
+  assert.ok(result.incomplete.some((n) => n.includes('app/huge.ts')), result.incomplete.join('\n'));
+  assert.equal(runCli(['--cwd', root, '--offline', '--no-banner', '--quiet']).code, 3);
+});
+
+test('central redaction is idempotent on snippets another rule already masked', async () => {
+  const { redactFindings } = await import('../dist/utils/redact.js');
+  const masked = `const k = "${maskSecret(OPENAI_KEY)}";`;
+  const finding = {
+    id: 'X', severity: 'high', title: 't', detail: `d ${maskSecret(OPENAI_KEY)}`, fix: 'f',
+    file: 'a.ts', line: 1, snippet: masked,
+  };
+  const once = redactFindings([finding], () => masked);
+  assert.equal(once[0].snippet, masked);
+  assert.deepEqual(redactFindings(once, () => masked), once);
+  const raw = { ...finding, snippet: `const k = "${OPENAI_KEY}";` };
+  const fromRaw = redactFindings([raw], () => raw.snippet);
+  assert.equal(fromRaw[0].snippet, masked);
+  assert.deepEqual(redactFindings(fromRaw, () => raw.snippet), fromRaw);
+});

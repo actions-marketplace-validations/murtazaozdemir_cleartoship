@@ -95,6 +95,8 @@ export interface WalkResult {
   escapingSymlinks: number;
   /** How many files were left unread for exceeding `MAX_FILE_BYTES`. */
   oversize: number;
+  /** The files counted in `oversize`, absolute paths. */
+  oversizeFiles: string[];
   /** Names of the build/dependency directories skipped whole, deduplicated. */
   skippedDirs: string[];
   /**
@@ -211,6 +213,7 @@ export function walk(
   // size and a directory skipped by name produce no findings, and "no findings"
   // must never be silently indistinguishable from "nothing was wrong".
   let oversize = 0;
+  const oversizeFiles: string[] = [];
   const skippedDirs = new Set<string>();
 
   visited.add(rootReal);
@@ -254,6 +257,7 @@ export function walk(
     // a source file this skipped, and reporting it as one is noise.
     if (size > MAX_FILE_BYTES) {
       oversize++;
+      oversizeFiles.push(full);
       return;
     }
     if (!canRead(full)) {
@@ -280,6 +284,7 @@ export function walk(
       gitIgnored,
       escapingSymlinks,
       oversize,
+      oversizeFiles,
       skippedDirs: [],
       unreadable,
       warnings,
@@ -354,6 +359,7 @@ export function walk(
     gitIgnored,
     escapingSymlinks,
     oversize,
+    oversizeFiles: oversizeFiles.sort(),
     skippedDirs: [...skippedDirs].sort(),
     unreadable: unreadable.sort(),
     warnings,
