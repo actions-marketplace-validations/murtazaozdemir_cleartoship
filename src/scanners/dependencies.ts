@@ -1,6 +1,5 @@
-import { basename, join } from 'node:path';
-import { readFileSync } from 'node:fs';
-import { read, rel, isProse, lineAt } from '../utils/files.js';
+import { basename } from 'node:path';
+import { read, rel, isProse, lineAt, safeRead } from '../utils/files.js';
 import { Registry, pool } from '../utils/registry.js';
 import { queryOsv, severityForVulnerability } from '../utils/osv.js';
 import type { OsvQuery } from '../utils/osv.js';
@@ -127,6 +126,16 @@ function packageJsonName(source: string): string | null {
   }
 }
 
+/** The `version` a package.json declares, if any. */
+function packageJsonVersion(source: string): string | null {
+  try {
+    const version = JSON.parse(source)?.version;
+    return typeof version === 'string' && version ? version : null;
+  } catch {
+    return null;
+  }
+}
+
 /** `[project] name` / `[tool.poetry] name` from a pyproject.toml. */
 function pyprojectName(source: string): string | null {
   let inProject = false;
@@ -151,12 +160,9 @@ function pyprojectName(source: string): string | null {
 function privateScopes(root: string): Set<string> {
   const scopes = new Set<string>();
   for (const name of ['.npmrc', '.yarnrc.yml']) {
-    let source: string;
-    try {
-      source = readFileSync(join(root, name), 'utf8');
-    } catch {
-      continue;
-    }
+    // Read like everything else: inside the root, a regular file, capped.
+    const source = safeRead(root, name, 1_000_000);
+    if (source === null) continue;
     const re = /(@[a-z0-9-~][a-z0-9-._~]*)\s*:\s*registry\s*[=:]/gi;
     let m: RegExpExecArray | null;
     while ((m = re.exec(source)) !== null) scopes.add(m[1]!.toLowerCase());
@@ -329,6 +335,150 @@ function collectInstallScriptFindings(source: string, relPath: string): Finding[
   return findings;
 }
 
+/** Lockfiles are routinely megabytes; anything past this is not one. */
+const LOCKFILE_MAX_BYTES = 64_000_000;
+
+/** A package this repository defines, and where. */
+interface LocalPackage {
+  name: string;
+  ecosystem: 'npm' | 'pypi';
+  /** Directory of the manifest, relative to the root; '' for the root itself. */
+  dir: string;
+  version: string | null;
+}
+
+/**
+ * Workspace globs the root declares: `workspaces` in package.json (array or
+ * `{ packages }`), `packages` in pnpm-workspace.yaml and lerna.json.
+ */
+function workspaceGlobs(root: string): string[] {
+  const globs: string[] = [];
+  const push = (v: unknown) => {
+    if (Array.isArray(v)) for (const g of v) if (typeof g === 'string' && g.length < 300) globs.push(g);
+  };
+  const pkg = safeRead(root, 'package.json', 1_000_000);
+  if (pkg) {
+    try {
+      const ws = JSON.parse(pkg)?.workspaces;
+      push(Array.isArray(ws) ? ws : ws?.packages);
+    } catch {
+      /* malformed; no workspaces */
+    }
+  }
+  const lerna = safeRead(root, 'lerna.json', 1_000_000);
+  if (lerna) {
+    try {
+      push(JSON.parse(lerna)?.packages);
+    } catch {
+      /* malformed */
+    }
+  }
+  const pnpm = safeRead(root, 'pnpm-workspace.yaml', 1_000_000);
+  if (pnpm) {
+    let inPackages = false;
+    for (const raw of pnpm.split(/\r?\n/)) {
+      if (/^packages\s*:/.test(raw)) {
+        inPackages = true;
+        continue;
+      }
+      if (/^\S/.test(raw)) inPackages = false;
+      if (!inPackages) continue;
+      const m = /^\s+-\s*(["']?)(.+?)\1\s*(?:#.*)?$/.exec(raw);
+      if (m) globs.push(m[2]!);
+    }
+  }
+  return globs;
+}
+
+/** One path segment against one glob segment (`*`, `?`), without backtracking blow-up. */
+function segmentMatches(glob: string, text: string): boolean {
+  let g = 0;
+  let t = 0;
+  let star = -1;
+  let mark = 0;
+  while (t < text.length) {
+    if (g < glob.length && (glob[g] === '?' || glob[g] === text[t])) {
+      g++;
+      t++;
+    } else if (g < glob.length && glob[g] === '*') {
+      star = g++;
+      mark = t;
+    } else if (star !== -1) {
+      g = star + 1;
+      t = ++mark;
+    } else {
+      return false;
+    }
+  }
+  while (g < glob.length && glob[g] === '*') g++;
+  return g === glob.length;
+}
+
+/** Whether a directory (relative, `/`-separated) matches a workspace glob. */
+function globMatches(glob: string, dir: string): boolean {
+  const gs = glob.replace(/^\.\//, '').replace(/\/+$/, '').split('/').filter(Boolean);
+  const ps = dir.split('/').filter(Boolean);
+  // reach[i][j]: the first i glob segments can consume the first j path segments.
+  let reach = new Array<boolean>(ps.length + 1).fill(false);
+  reach[0] = true;
+  for (const seg of gs) {
+    const next = new Array<boolean>(ps.length + 1).fill(false);
+    for (let j = 0; j <= ps.length; j++) {
+      if (!reach[j]) continue;
+      if (seg === '**') {
+        for (let k = j; k <= ps.length; k++) next[k] = true;
+      } else if (j < ps.length && segmentMatches(seg, ps[j]!)) {
+        next[j + 1] = true;
+      }
+    }
+    reach = next;
+  }
+  return reach[ps.length] === true;
+}
+
+function isWorkspaceMember(globs: string[], dir: string): boolean {
+  let member = false;
+  for (const g of globs) {
+    if (g.startsWith('!')) {
+      if (globMatches(g.slice(1), dir)) member = false;
+    } else if (globMatches(g, dir)) {
+      member = true;
+    }
+  }
+  return member;
+}
+
+/**
+ * Loose semver: does `version` fall in `range`? Only the shapes a sibling
+ * dependency is written with (`^1.2.3`, `~1.2.3`, `1.2.3`, `>=1.2.3`, `*`,
+ * `a || b`); anything else answers no, which means "look it up".
+ */
+function satisfies(version: string, range: string): boolean {
+  const v = /^(\d+)\.(\d+)\.(\d+)/.exec(version);
+  if (!v) return false;
+  const [maj, min, pat] = [Number(v[1]), Number(v[2]), Number(v[3])];
+  const cmp = (a: number[], b: number[]) => a[0]! - b[0]! || a[1]! - b[1]! || a[2]! - b[2]!;
+  return range.split('||').some((alt) => {
+    const r = alt.trim();
+    if (r === '*' || r === '' || r === 'latest' || r === 'x') return true;
+    const m = /^(\^|~|>=|=)?\s*v?(\d+)\.(\d+)\.(\d+)$/.exec(r);
+    if (!m) return false;
+    const floor = [Number(m[2]), Number(m[3]), Number(m[4])];
+    const here = [maj, min, pat];
+    if (cmp(here, floor) < 0) return false;
+    switch (m[1]) {
+      case '^':
+        return floor[0]! > 0 ? maj === floor[0] : min === floor[1] && (floor[1]! > 0 || pat === floor[2]);
+      case '~':
+        return maj === floor[0] && min === floor[1];
+      case '>=':
+        return true;
+      default:
+        return cmp(here, floor) === 0;
+    }
+  });
+}
+
 /**
  * Resolves the version actually installed for each declared dependency.
  *
@@ -349,13 +499,10 @@ function resolveVersions(root: string, declared: Declared[]): Map<string, string
     if (!resolved.has(key)) resolved.set(key, version);
   };
 
-  const readIfPresent = (name: string): string | null => {
-    try {
-      return readFileSync(join(root, name), 'utf8');
-    } catch {
-      return null;
-    }
-  };
+  // Contained like every other read: a `pnpm-lock.yaml` symlinked to a file
+  // outside the repository used to be read, and the versions in it quoted in
+  // the report. The cap is generous because real lockfiles are megabytes.
+  const readIfPresent = (name: string): string | null => safeRead(root, name, LOCKFILE_MAX_BYTES);
 
   const npmLock = readIfPresent('package-lock.json');
   if (npmLock) {
@@ -443,24 +590,26 @@ export const dependencyScanner: Scanner = {
   async run(ctx): Promise<ScanResult> {
     const result = emptyResult();
     const declared: Declared[] = [];
-    // Every package this repository defines itself — the root one and, in a
-    // monorepo, each workspace. None of them is a third-party dependency.
-    const local = new Set<string>();
+    // Every package this repository defines itself. Which of them may excuse a
+    // dependency from being looked up is decided below — not every manifest
+    // with a `name` is a package of this project.
+    const localPackages: LocalPackage[] = [];
 
     for (const file of ctx.files) {
       const b = basename(file);
       const source = read(file);
       if (source === null) continue;
       const relPath = rel(ctx.root, file);
+      const dir = relPath.includes('/') ? relPath.slice(0, relPath.lastIndexOf('/')) : '';
       if (b === 'package.json') {
         const own = packageJsonName(source);
-        if (own) local.add(`npm:${own}`);
+        if (own) localPackages.push({ name: own, ecosystem: 'npm', dir, version: packageJsonVersion(source) });
         declared.push(...collectFromPackageJson(source, relPath));
         result.findings.push(...collectInstallScriptFindings(source, relPath));
       } else if (b === 'requirements.txt') declared.push(...collectFromRequirements(source, relPath));
       else if (b === 'pyproject.toml') {
         const own = pyprojectName(source);
-        if (own) local.add(`pypi:${own}`);
+        if (own) localPackages.push({ name: own, ecosystem: 'pypi', dir, version: null });
         declared.push(...collectFromPyproject(source, relPath));
       } else if (isProse(file)) declared.push(...collectFromProse(source, relPath));
     }
@@ -469,10 +618,28 @@ export const dependencyScanner: Scanner = {
     const scopes = privateScopes(ctx.root);
     let skippedLocal = 0;
     let skippedPrivate = 0;
+    // A nested manifest's `name` used to excuse that name everywhere: a
+    // `test/fixtures/x/package.json` saying `{"name":"minimist"}` switched off
+    // the CVE lookup for the root's real `minimist@1.2.0`, and the typosquat
+    // check with it. A name now counts as this repository's own only when it is
+    // the root package, or a workspace the root actually declares. An
+    // undeclared nested package still excuses a *sibling manifest's* dependency
+    // on it, but only when its own version satisfies the range asked for —
+    // never the root manifest's dependencies, and never prose.
+    const globs = workspaceGlobs(ctx.root);
+    const isLocal = (d: Declared): boolean =>
+      localPackages.some((p) => {
+        if (p.ecosystem !== d.ecosystem || p.name !== d.name) return false;
+        if (p.dir === '' || isWorkspaceMember(globs, p.dir)) return true;
+        const declaredInNested = !d.fromProse && d.file.includes('/');
+        if (!declaredInNested) return false;
+        if (d.ecosystem === 'pypi') return true;
+        return p.version !== null && satisfies(p.version, d.range);
+      });
     const checkable = declared.filter((d) => {
       if (/^(file:|link:|workspace:|portal:|git\+|https?:|github:|npm:)/.test(d.range)) return false;
-      // Defined right here — by the root manifest or a sibling workspace.
-      if (local.has(`${d.ecosystem}:${d.name}`)) {
+      // Defined right here — by the root manifest or a declared workspace.
+      if (isLocal(d)) {
         skippedLocal++;
         return false;
       }

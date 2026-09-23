@@ -1,9 +1,12 @@
 import {
   readdirSync, statSync, readFileSync, existsSync, realpathSync,
-  openSync, readSync, closeSync,
+  openSync, readSync, closeSync, accessSync, constants as fsConstants,
 } from 'node:fs';
-import { join, relative, sep } from 'node:path';
-import { Gitignore, extendedAt, repositoryExcludes } from './gitignore.js';
+import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
+import {
+  Gitignore, extendedAt, repositoryExcludes, readGitIndex, isTracked, readBounded,
+} from './gitignore.js';
+import type { IndexLookup, TrackedPaths } from './gitignore.js';
 
 /**
  * Directories that hold no first-party source: dependency trees, build output,
@@ -42,7 +45,7 @@ const AGENT_FILES = new Set([
 ]);
 
 /** Files bigger than this are almost certainly bundles or fixtures, not source. */
-const MAX_FILE_BYTES = 2_000_000;
+export const MAX_FILE_BYTES = 2_000_000;
 
 /**
  * Precise generated-code detection — deliberately NOT a blanket skip of any
@@ -94,6 +97,15 @@ export interface WalkResult {
   oversize: number;
   /** Names of the build/dependency directories skipped whole, deduplicated. */
   skippedDirs: string[];
+  /**
+   * Files the scan would have read and directories it would have entered, but
+   * could not open (permission denied, mostly). Absolute paths. Every scanner
+   * used to meet these as a `read()` that returned null and move on, so a
+   * `chmod 000` file was counted as scanned and the run came out clear.
+   */
+  unreadable: string[];
+  /** Things the walk wants said out loud, e.g. an index it could not read. */
+  warnings: string[];
 }
 
 /**
@@ -103,14 +115,92 @@ export interface WalkResult {
  */
 const SCAN_EVEN_IF_IGNORED = /(^|\/)\.env(\.|$)/;
 
-export function walk(root: string, options: { respectGitignore?: boolean } = {}): WalkResult {
-  const respect = options.respectGitignore !== false;
+/** The repository whose index decides what is tracked beneath `root`. */
+interface RepoContext {
+  /** Working-tree root, in the walk's own path space (not realpath'd). */
+  root: string;
+  tracked: TrackedPaths;
+}
+
+/**
+ * Finds the repository a walk starting at `start` belongs to, looking no higher
+ * than `ceiling` (the project root): `cleartoship app` walks `app/`, but the
+ * repository it is tracked by sits one level up.
+ */
+function findRepository(start: string, ceiling: string): { dir: string; lookup: IndexLookup } | null {
+  let dir = resolve(start);
+  const top = resolve(ceiling);
+  const inside = dir === top || dir.startsWith(top.endsWith(sep) ? top : top + sep);
+  for (;;) {
+    const lookup = readGitIndex(dir);
+    if (lookup.kind !== 'none') return { dir, lookup };
+    if (!inside || dir === top) return null;
+    const parent = dirname(dir);
+    if (parent === dir) return null;
+    dir = parent;
+  }
+}
+
+function relSlash(from: string, to: string): string {
+  return relative(from, to).split(sep).join('/');
+}
+
+export function walk(
+  root: string,
+  options: { respectGitignore?: boolean; projectRoot?: string } = {},
+): WalkResult {
   const found: string[] = [];
+  const unreadable: string[] = [];
+  const warnings: string[] = [];
   let gitIgnored = 0;
+
+  // Git never ignores a file it tracks. Without this, a committed `.gitignore`
+  // that lists a committed file hid that file from every scanner — reported
+  // CLEAR TO SHIP on code nobody opened. So the index decides first, and when
+  // there is a repository whose index cannot be read, ignore rules are not
+  // honoured at all: scanning a few extra files is a cost, skipping a tracked
+  // one is the failure this tool exists to prevent.
+  let respect = options.respectGitignore !== false;
+  let repo: RepoContext | null = null;
+  if (respect) {
+    const located = findRepository(root, options.projectRoot ?? root);
+    if (located?.lookup.kind === 'ok') {
+      repo = { root: located.dir, tracked: located.lookup.tracked };
+    } else if (located?.lookup.kind === 'error') {
+      respect = false;
+      warnings.push(
+        `${located.dir} is a git repository, but its index could not be read (${located.lookup.reason}), ` +
+          'so which files git tracks is unknown. .gitignore was NOT honoured for this scan: ignored ' +
+          'files were scanned too, rather than risk skipping a tracked one.',
+      );
+    }
+  }
+
+  // A symlink that leaves the tree is not part of the project, and following one
+  // would be worse than useless: `vendor-config -> /home/runner/.ssh` makes the
+  // scanner read that directory and quote what it finds — into a pull-request
+  // comment, in the Action. So the scan stays inside what it was pointed at.
+  let rootReal: string;
+  try {
+    rootReal = realpathSync(root);
+  } catch {
+    rootReal = root;
+  }
+  // Ignore files are read like everything else: inside the root, regular
+  // files only, capped. `.gitignore -> /dev/zero` used to be read to the end.
+  const readIgnore = (p: string) => readBounded(p, MAX_FILE_BYTES, rootReal);
+
   const rootRules = respect
-    ? extendedAt(repositoryExcludes(root, read), root, read)
+    ? extendedAt(repositoryExcludes(root, readIgnore), root, readIgnore)
     : Gitignore.empty();
-  const stack: { dir: string; rules: Gitignore }[] = [{ dir: root, rules: rootRules }];
+
+  interface Frame {
+    dir: string;
+    rules: Gitignore;
+    /** Entered only because it holds tracked paths, though the rules ignore it. */
+    ignoredButTracked: boolean;
+  }
+  const stack: Frame[] = [{ dir: root, rules: rootRules, ignoredButTracked: false }];
   // A symlinked directory that points back into the tree — `self -> .`, or the
   // A→B→A pair a workspace layout can produce — otherwise gets walked again on
   // every pass, reporting the same file at a dozen different paths. Resolving
@@ -123,23 +213,29 @@ export function walk(root: string, options: { respectGitignore?: boolean } = {})
   let oversize = 0;
   const skippedDirs = new Set<string>();
 
-  // A symlink that leaves the tree is not part of the project, and following one
-  // would be worse than useless: `vendor-config -> /home/runner/.ssh` makes the
-  // scanner read that directory and quote what it finds — into a pull-request
-  // comment, in the Action. So the scan stays inside what it was pointed at.
-  let rootReal: string;
-  try {
-    rootReal = realpathSync(root);
-  } catch {
-    rootReal = root;
-  }
   visited.add(rootReal);
   const insideRoot = (real: string): boolean =>
     real === rootReal || real.startsWith(rootReal.endsWith('/') ? rootReal : rootReal + '/');
 
+  const tracked = (full: string, isDir: boolean): boolean => {
+    if (!repo) return false;
+    const r = relSlash(repo.root, full);
+    if (r === '' || r.startsWith('..')) return false;
+    return isTracked(repo.tracked, r, isDir);
+  };
+
+  /** Whether git would leave this path out: ignored by the rules and not tracked. */
+  const ignored = (full: string, isDir: boolean, frame: Frame): boolean => {
+    if (!respect) return false;
+    if (tracked(full, isDir)) return false;
+    // Inside a directory the rules ignore, only tracked paths belong to the project.
+    if (frame.ignoredButTracked) return true;
+    return frame.rules.ignores(full, isDir);
+  };
+
   /** Whether one regular file is worth reading, and the tallies for when it is not. */
-  const consider = (full: string, entry: string, size: number, rules: Gitignore): void => {
-    if (respect && !SCAN_EVEN_IF_IGNORED.test(full) && rules.ignores(full, false)) {
+  const consider = (full: string, entry: string, size: number, frame: Frame): void => {
+    if (!SCAN_EVEN_IF_IGNORED.test(full) && ignored(full, false, frame)) {
       gitIgnored++;
       return;
     }
@@ -160,6 +256,10 @@ export function walk(root: string, options: { respectGitignore?: boolean } = {})
       oversize++;
       return;
     }
+    if (!canRead(full)) {
+      unreadable.push(full);
+      return;
+    }
     if (!looksGenerated(full)) found.push(full);
   };
 
@@ -174,22 +274,28 @@ export function walk(root: string, options: { respectGitignore?: boolean } = {})
     rootStat = null;
   }
   if (rootStat?.isFile()) {
-    consider(root, root.slice(root.lastIndexOf(sep) + 1), rootStat.size, rootRules);
+    consider(root, root.slice(root.lastIndexOf(sep) + 1), rootStat.size, stack[0]!);
     return {
       files: found.sort(),
       gitIgnored,
       escapingSymlinks,
       oversize,
       skippedDirs: [],
+      unreadable,
+      warnings,
     };
   }
 
   while (stack.length) {
-    const { dir, rules } = stack.pop()!;
+    const frame = stack.pop()!;
+    const { dir, rules } = frame;
     let entries: string[];
     try {
       entries = readdirSync(dir);
     } catch {
+      // A directory that exists but cannot be listed hides everything in it.
+      // (A root that does not exist at all is reported by `scan` instead.)
+      if (rootStat !== null) unreadable.push(dir);
       continue;
     }
     for (const entry of entries) {
@@ -219,16 +325,28 @@ export function walk(root: string, options: { respectGitignore?: boolean } = {})
         if (visited.has(real)) continue;
         visited.add(real);
         // git never descends into an ignored directory, and neither do we —
-        // which is also where most of the saving comes from.
-        if (respect && rules.ignores(full, true)) {
-          gitIgnored++;
-          continue;
+        // which is also where most of the saving comes from. Unless git tracks
+        // something inside it: then the walk goes in, and takes only the
+        // tracked paths from it.
+        let ignoredButTracked = frame.ignoredButTracked;
+        if (respect) {
+          const holdsTracked = tracked(full, true);
+          const ruledOut = frame.ignoredButTracked || rules.ignores(full, true);
+          if (ruledOut && !holdsTracked) {
+            gitIgnored++;
+            continue;
+          }
+          if (ruledOut) ignoredButTracked = true;
         }
-        stack.push({ dir: full, rules: respect ? extendedAt(rules, full, read) : rules });
+        stack.push({
+          dir: full,
+          rules: respect ? extendedAt(rules, full, readIgnore) : rules,
+          ignoredButTracked,
+        });
         continue;
       }
       if (!st.isFile()) continue;
-      consider(full, entry, st.size, rules);
+      consider(full, entry, st.size, frame);
     }
   }
   return {
@@ -237,7 +355,39 @@ export function walk(root: string, options: { respectGitignore?: boolean } = {})
     escapingSymlinks,
     oversize,
     skippedDirs: [...skippedDirs].sort(),
+    unreadable: unreadable.sort(),
+    warnings,
   };
+}
+
+/** Whether this process can open the file for reading. */
+function canRead(full: string): boolean {
+  try {
+    accessSync(full, fsConstants.R_OK);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Reads one file the scan did not find by walking — a lockfile, `.npmrc`, the
+ * root `package.json` — the way the walker reads everything else: `relPath`
+ * must resolve (symlinks included) to a regular file inside `root`, no larger
+ * than `maxBytes`. Anything else reads as absent.
+ *
+ * Every direct read of a fixed name goes through here. Before it, a
+ * `pnpm-lock.yaml -> ../../somewhere/else` was read and its contents quoted in
+ * the report, and a `.gitignore -> /dev/zero` was read until memory ran out.
+ */
+export function safeRead(root: string, relPath: string, maxBytes: number = MAX_FILE_BYTES): string | null {
+  let rootReal: string;
+  try {
+    rootReal = realpathSync(root);
+  } catch {
+    return null;
+  }
+  return readBounded(isAbsolute(relPath) ? relPath : join(root, relPath), maxBytes, rootReal);
 }
 
 export function read(file: string): string | null {
