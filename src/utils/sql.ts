@@ -134,12 +134,18 @@ export function clauseAfter(text: string, keyword: RegExp): string | null {
   return readBalanced(text, i);
 }
 
-/** Normalises `"public"."posts"` / `public.posts` / `posts` to `public.posts`. */
+/**
+ * Normalises `"public"."posts"` / `public.posts` / `posts` to `public.posts`.
+ * PostgreSQL folds unquoted identifiers to lower case, so `Profiles` and
+ * `profiles` name the same table while `"Profiles"` names a different one:
+ * unquoted parts are lowercased, quoted parts are kept exactly as written.
+ */
 export function normaliseTable(raw: string): string {
   const parts = raw
     .trim()
     .split('.')
-    .map((p) => p.replace(/^"(.*)"$/, '$1').trim())
+    .map((p) => p.trim())
+    .map((p) => (/^".*"$/.test(p) ? p.slice(1, -1) : p.toLowerCase()))
     .filter(Boolean);
   if (parts.length === 0) return '';
   if (parts.length === 1) return `public.${parts[0]}`;
@@ -149,9 +155,79 @@ export function normaliseTable(raw: string): string {
 const IDENT = `(?:"[^"]+"|[A-Za-z_][A-Za-z0-9_$]*)`;
 export const QUALIFIED_NAME = `${IDENT}(?:\\s*\\.\\s*${IDENT})*`;
 
-/** True when a policy predicate lets everything through. */
+/** Removes parentheses that wrap the whole expression, however deeply nested. */
+function stripOuterParens(expr: string): string {
+  let s = expr.trim();
+  while (s.startsWith('(')) {
+    const inner = readBalanced(s, 0);
+    if (inner === null || inner.length + 2 !== s.length) break;
+    s = inner.trim();
+  }
+  return s;
+}
+
+/** A constant literal (`true`, `1`, `'a'`) with any trailing cast dropped, or null. */
+function literalValue(expr: string): string | null {
+  const s = stripOuterParens(expr)
+    .replace(/\s*::\s*(boolean|bool|int|integer|text)\s*$/i, '')
+    .trim();
+  const lowered = s.toLowerCase();
+  if (lowered === 'true' || lowered === 'false') return lowered;
+  if (/^-?\d+(\.\d+)?$/.test(s)) return String(Number(s));
+  if (/^'(?:[^']|'')*'$/.test(s)) return s;
+  return null;
+}
+
+/** Splits `a = b` at its single top-level `=` (not part of `<=`, `>=`, `!=`, `=>`). */
+function splitEquality(expr: string): [string, string] | null {
+  let depth = 0;
+  let inString = false;
+  let at = -1;
+  for (let i = 0; i < expr.length; i++) {
+    const ch = expr[i]!;
+    if (inString) { if (ch === "'") inString = false; continue; }
+    if (ch === "'") { inString = true; continue; }
+    if (ch === '(') depth++;
+    else if (ch === ')') depth--;
+    else if (ch === '=' && depth === 0) {
+      const prev = expr[i - 1];
+      const next = expr[i + 1];
+      if (prev === '<' || prev === '>' || prev === '!' || next === '>' || next === '=') return null;
+      if (at !== -1) return null;
+      at = i;
+    }
+  }
+  return at === -1 ? null : [expr.slice(0, at), expr.slice(at + 1)];
+}
+
+/** true / false for a constant predicate, null for anything that depends on the row or caller. */
+function constantTruth(expr: string, depth = 0): boolean | null {
+  if (depth > 20) return null;
+  const s = stripOuterParens(expr).replace(/\s+/g, ' ');
+  const lit = literalValue(s);
+  if (lit === 'true' || lit === '1') return true;
+  if (lit === 'false' || lit === '0') return false;
+  const not = /^not\s+(.+)$/i.exec(s);
+  if (not) {
+    const inner = constantTruth(not[1]!, depth + 1);
+    return inner === null ? null : !inner;
+  }
+  const eq = splitEquality(s);
+  if (eq) {
+    const left = literalValue(eq[0]);
+    const right = literalValue(eq[1]);
+    if (left !== null && right !== null) return left === right;
+  }
+  return null;
+}
+
+/**
+ * True when a policy predicate lets everything through: `true`, `((true))`,
+ * `1 = 1`, `'a' = 'a'`, `true = true`, `not false`, `true::boolean`. Only
+ * constant expressions are judged; anything reading a column or calling a
+ * function is not always-true as far as this is concerned.
+ */
 export function isAlwaysTrue(expr: string | null): boolean {
   if (expr === null) return false;
-  const cleaned = expr.replace(/\s+/g, ' ').replace(/[()]/g, ' ').trim().toLowerCase();
-  return cleaned === 'true' || cleaned === '1' || cleaned === 'true::boolean';
+  return constantTruth(expr) === true;
 }

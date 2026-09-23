@@ -1,9 +1,169 @@
 import {
   read, rel, isSql, snippetAt,
-  splitStatements, clauseAfter, normaliseTable, isAlwaysTrue, QUALIFIED_NAME,
+  splitStatements, normaliseTable, isAlwaysTrue, QUALIFIED_NAME,
   Suppressions, emptyResult,
 } from '../internal.js';
+// Not re-exported through internal.ts; sql.ts has no imports of its own, so
+// reaching it directly cannot introduce an initialisation-order cycle.
+import { readBalanced } from '../utils/sql.js';
 import type { Finding, ProjectContext, ScanResult, Scanner, Severity } from '../internal.js';
+import { existsSync } from 'node:fs';
+import { dirname, join, relative, resolve, isAbsolute } from 'node:path';
+
+/* ------------------------------------------------------------------------- *
+ * Which .sql files are PostgreSQL at all.
+ *
+ * `ctx.framework.supabase` is a repo-wide flag, so one Supabase package in a
+ * monorepo used to make every .sql file in it — a Cloudflare D1 (SQLite)
+ * migration included — read as a Supabase table with RLS off. Each file is
+ * now judged on its own. A file is *excluded* only on positive evidence that
+ * it is not Postgres; without that evidence the old behaviour stands, because
+ * dropping a Postgres file on a guess is a clean report on unread code.
+ * ------------------------------------------------------------------------- */
+
+/** RLS / Supabase-auth idioms: a file carrying these is Postgres, whatever else is true. */
+const PG_RLS_IDIOMS =
+  /\brow\s+level\s+security\b|\bauth\.(uid|jwt|role)\s*\(|\bto\s+(anon|authenticated)\b|\bcreate\s+policy\b/i;
+
+/**
+ * SQLite-only syntax. Each of these is a syntax error or an unknown function
+ * in PostgreSQL, so one of them is real evidence — unlike `INTEGER PRIMARY
+ * KEY` or `TEXT`, which both dialects accept.
+ */
+const SQLITE_ONLY =
+  /\bautoincrement\b|\bunixepoch\s*\(|\bwithout\s+rowid\b|^\s*pragma\s+\w|\bstrftime\s*\(|\bdatetime\s*\(\s*'now'/im;
+
+/** Postgres-only syntax; any of it vetoes the SQLite reading. */
+const POSTGRES_ONLY =
+  /\b(uuid|jsonb|timestamptz|bigserial|serial|gen_random_uuid|plpgsql|security\s+definer)\b|\bcreate\s+(extension|schema|type)\b|\$\$|\bauth\s*\.\s*users\b/i;
+
+const WRANGLER_CONFIGS = ['wrangler.toml', 'wrangler.json', 'wrangler.jsonc'];
+
+function isWithin(dir: string, file: string): boolean {
+  const r = relative(dir, file);
+  return r !== '' && !r.startsWith('..') && !isAbsolute(r);
+}
+
+/** Directories from `start` up to and including `root` (start must be inside root). */
+function ancestors(start: string, root: string): string[] {
+  const out: string[] = [];
+  let dir = start;
+  for (;;) {
+    out.push(dir);
+    if (dir === root || !isWithin(root, dir)) break;
+    const parent = dirname(dir);
+    if (parent === dir) break;
+    dir = parent;
+  }
+  return out;
+}
+
+function dependsOnSupabase(pkg: any): boolean {
+  for (const field of ['dependencies', 'devDependencies', 'peerDependencies']) {
+    const deps = pkg?.[field];
+    if (deps && typeof deps === 'object' && Object.keys(deps).some((d) => d === 'supabase' || d.startsWith('@supabase/'))) {
+      return true;
+    }
+  }
+  return false;
+}
+
+interface DialectModel {
+  /** Absolute dirs holding a wrangler config that declares D1 databases. */
+  d1ConfigDirs: Set<string>;
+  /** Absolute D1 `migrations_dir` paths, resolved against their config. */
+  d1MigrationDirs: Set<string>;
+  /** Directory → whether its nearest package.json depends on Supabase (null: none found). */
+  pkgCache: Map<string, boolean | null>;
+}
+
+function buildDialectModel(ctx: ProjectContext): DialectModel {
+  const d1ConfigDirs = new Set<string>();
+  const d1MigrationDirs = new Set<string>();
+  // Every directory the scan touched and its ancestors: that is where a
+  // wrangler config next to (or above) a migration, or one pointing at it
+  // through `migrations_dir`, can live. `.jsonc` is not a scanned extension,
+  // so configs are looked up on disk rather than taken from ctx.files.
+  const dirs = new Set<string>();
+  for (const f of ctx.files) for (const d of ancestors(dirname(f), ctx.root)) dirs.add(d);
+  for (const dir of dirs) {
+    for (const name of WRANGLER_CONFIGS) {
+      const path = join(dir, name);
+      if (!existsSync(path)) continue;
+      const src = read(path);
+      if (!src || !/\bd1_databases\b/.test(src)) continue;
+      d1ConfigDirs.add(dir);
+      const declared = [...src.matchAll(/["']?migrations_dir["']?\s*[:=]\s*["']([^"']+)["']/g)].map((m) => m[1]!);
+      for (const m of declared.length ? declared : ['migrations']) d1MigrationDirs.add(resolve(dir, m));
+    }
+  }
+  return { d1ConfigDirs, d1MigrationDirs, pkgCache: new Map() };
+}
+
+function nearestPackageSupabase(model: DialectModel, file: string, root: string): boolean | null {
+  const chain = ancestors(dirname(file), root);
+  let answer: boolean | null = null;
+  let resolvedAt = chain.length;
+  for (let i = 0; i < chain.length; i++) {
+    const cached = model.pkgCache.get(chain[i]!);
+    if (cached !== undefined) { answer = cached; resolvedAt = i; break; }
+    const raw = read(join(chain[i]!, 'package.json'));
+    if (raw === null) continue;
+    try {
+      answer = dependsOnSupabase(JSON.parse(raw));
+    } catch {
+      answer = null;
+    }
+    resolvedAt = i;
+    break;
+  }
+  for (let i = 0; i <= Math.min(resolvedAt, chain.length - 1); i++) model.pkgCache.set(chain[i]!, answer);
+  return answer;
+}
+
+const dialectCache = new WeakMap<ProjectContext, string[]>();
+
+/**
+ * The .sql files this scanner should model as PostgreSQL.
+ *
+ * Excluded (not Postgres) — only when the file is not under a `supabase/`
+ * directory and carries no RLS / Supabase-auth idiom, and then either:
+ *   - it sits in a D1 `migrations_dir`, or under a directory whose wrangler
+ *     config declares `d1_databases` while its nearest package.json does not
+ *     depend on Supabase; or
+ *   - it uses SQLite-only syntax (AUTOINCREMENT, unixepoch(), …) and no
+ *     Postgres-only syntax.
+ * Included — everything else, provided something says Postgres/Supabase: the
+ * file is under `supabase/`, its nearest package.json depends on Supabase, or
+ * the repo-wide signals (the root dependency set, a root `supabase/` dir, RLS
+ * idioms in any remaining SQL file) hold.
+ */
+function postgresSqlFiles(ctx: ProjectContext): string[] {
+  const cached = dialectCache.get(ctx);
+  if (cached) return cached;
+  const sql = ctx.files.filter(isSql);
+  if (sql.length === 0) { dialectCache.set(ctx, []); return []; }
+
+  const model = buildDialectModel(ctx);
+  const candidates: { file: string; src: string; perFile: boolean }[] = [];
+  for (const file of sql) {
+    const src = read(file) ?? '';
+    const underSupabase = rel(ctx.root, file).split('/').slice(0, -1).includes('supabase');
+    const idioms = PG_RLS_IDIOMS.test(src);
+    const pkgSupabase = nearestPackageSupabase(model, file, ctx.root) === true;
+    if (!underSupabase && !idioms) {
+      const inMigrationsDir = [...model.d1MigrationDirs].some((d) => isWithin(d, file));
+      const underD1Worker = !pkgSupabase && [...model.d1ConfigDirs].some((d) => isWithin(d, file));
+      const sqliteDialect = SQLITE_ONLY.test(src) && !POSTGRES_ONLY.test(src);
+      if (inMigrationsDir || underD1Worker || sqliteDialect) continue;
+    }
+    candidates.push({ file, src, perFile: underSupabase || idioms || pkgSupabase });
+  }
+  const repoSignal = ctx.framework.supabase || candidates.some((c) => PG_RLS_IDIOMS.test(c.src));
+  const out = candidates.filter((c) => repoSignal || c.perFile).map((c) => c.file);
+  dialectCache.set(ctx, out);
+  return out;
+}
 
 const OWNER_COLUMNS = [
   'user_id', 'owner_id', 'tenant_id', 'org_id', 'organization_id', 'account_id',
@@ -70,26 +230,71 @@ function parseColumns(body: string): string[] {
     .filter((c) => c && !['constraint', 'primary', 'foreign', 'unique', 'check', 'exclude', 'like'].includes(c));
 }
 
+/**
+ * Parses what follows `CREATE POLICY <name> ON <table>`:
+ *   [AS PERMISSIVE|RESTRICTIVE] [FOR cmd] [TO role, ...] [USING (…)] [WITH CHECK (…)]
+ * The name and table are already consumed, so words inside a policy name
+ * ("Enable read access for all users", "Anyone can add to cart") can no longer
+ * be mistaken for the FOR or TO clause, and only the header — the part before
+ * USING / WITH CHECK — is searched for them, so a string literal inside a
+ * predicate cannot be either.
+ */
+function parsePolicyTail(tail: string): Pick<Policy, 'command' | 'roles' | 'permissive' | 'using' | 'withCheck'> {
+  const bodyStart = /\busing\s*\(|\bwith\s+check\s*\(/i.exec(tail);
+  const header = bodyStart ? tail.slice(0, bodyStart.index) : tail;
+  const body = bodyStart ? tail.slice(bodyStart.index) : '';
+
+  const permissive = !/^\s*as\s+restrictive\b/i.test(header);
+  const command = /\bfor\s+(all|select|insert|update|delete)\b/i.exec(header)?.[1]?.toUpperCase() ?? 'ALL';
+  const toClause = /\bto\s+(.+?)\s*$/i.exec(header)?.[1];
+  const roles = toClause
+    ? toClause.split(',').map((r) => r.trim().replace(/^"(.*)"$/, '$1').toLowerCase()).filter(Boolean)
+    : ['public'];
+
+  let using: string | null = null;
+  let withCheck: string | null = null;
+  let rest = body;
+  const usingKw = /^\s*using\s*(?=\()/i.exec(rest);
+  if (usingKw) {
+    const open = usingKw[0].length;
+    using = readBalanced(rest, open);
+    if (using !== null) rest = rest.slice(open + using.length + 2);
+  }
+  const checkKw = /^\s*with\s+check\s*(?=\()/i.exec(rest);
+  if (checkKw) withCheck = readBalanced(rest, checkKw[0].length);
+  return { command, roles, permissive, using, withCheck };
+}
+
+/** True when a policy admits nobody but the service role. */
+function serviceRoleOnly(p: Policy): boolean {
+  if (p.roles.length > 0 && p.roles.every((r) => r === 'service_role')) return true;
+  const predicates = [p.using, p.withCheck].filter((e): e is string => e !== null);
+  return predicates.length > 0 &&
+    predicates.every((e) => /^[\s(]*(?:select\s+)?auth\.role\(\)[\s)]*=\s*'service_role'[\s)]*$/i.test(e));
+}
+
+/** `DROP TABLE [IF EXISTS] a, b [CASCADE | RESTRICT]` → the tables it drops. */
+function droppedTables(flat: string): string[] | null {
+  const m = /^drop\s+table\s+(?:if\s+exists\s+)?(.+?)(?:\s+(?:cascade|restrict))?\s*$/i.exec(flat);
+  if (!m) return null;
+  const nameRe = new RegExp(`^${QUALIFIED_NAME}$`);
+  return m[1]!
+    .split(',')
+    .map((n) => n.trim())
+    .filter((n) => nameRe.test(n))
+    .map(normaliseTable);
+}
+
 export const rlsScanner: Scanner = {
   name: 'Supabase / PostgreSQL Row Level Security',
 
   applies(ctx) {
-    if (!ctx.files.some(isSql)) return false;
     // Row Level Security is a PostgreSQL feature that Supabase builds on. This
     // scanner must not fire on SQLite / Cloudflare D1 / Prisma-sqlite schemas,
     // which have no RLS concept at all — doing so turns every CREATE TABLE into
-    // a false "RLS disabled" critical. Require a genuine Postgres/Supabase
-    // signal: the dependency set, a supabase/ directory, or RLS/auth idioms in
-    // the SQL itself.
-    if (ctx.framework.supabase) return true;
-    for (const file of ctx.files) {
-      if (!isSql(file)) continue;
-      const src = read(file);
-      if (src && /\brow\s+level\s+security\b|\bauth\.(uid|jwt|role)\s*\(|\bto\s+(anon|authenticated)\b|\bcreate\s+policy\b/i.test(src)) {
-        return true;
-      }
-    }
-    return false;
+    // a false "RLS disabled" critical. See postgresSqlFiles for how each file
+    // is judged.
+    return postgresSqlFiles(ctx).length > 0;
   },
 
   async run(ctx): Promise<ScanResult> {
@@ -102,7 +307,7 @@ export const rlsScanner: Scanner = {
     const suppressors = new Map<string, Suppressions>();
     const sources = new Map<string, string>();
 
-    const sqlFiles = ctx.files.filter(isSql).sort();
+    const sqlFiles = [...postgresSqlFiles(ctx)].sort();
 
     // Pass 1: build a model of the schema by replaying every migration in order.
     for (const file of sqlFiles) {
@@ -146,41 +351,37 @@ export const rlsScanner: Scanner = {
         ).exec(flat);
         if (alter) {
           const name = normaliseTable(alter[1]!);
-          const verb = alter[2]!.toLowerCase();
+          const verb = alter[2]!.toLowerCase().replace(/\s+/g, ' ');
+          // FORCE / NO FORCE only decide whether the table owner is also subject
+          // to the policies. They do not turn RLS on or off: FORCE without ENABLE
+          // leaves the table unprotected, and NO FORCE after ENABLE leaves it on.
+          if (verb !== 'enable' && verb !== 'disable') continue;
           const t = tables.get(name);
-          if (t) t.rlsEnabled = verb === 'enable' || verb === 'force';
+          if (t) t.rlsEnabled = verb === 'enable';
           else {
             tables.set(name, {
-              name, columns: [], rlsEnabled: verb === 'enable' || verb === 'force',
+              name, columns: [], rlsEnabled: verb === 'enable',
               file: relPath, line: stmt.line, createdInPublic: name.startsWith('public.'),
             });
           }
           continue;
         }
 
-        const drop = new RegExp(`^drop\\s+table\\s+(?:if\\s+exists\\s+)?(${QUALIFIED_NAME})`, 'i').exec(flat);
-        if (drop) { tables.delete(normaliseTable(drop[1]!)); continue; }
+        const dropped = droppedTables(flat);
+        if (dropped) { for (const name of dropped) tables.delete(name); continue; }
 
         const policy = new RegExp(
           `^create\\s+policy\\s+(${QUALIFIED_NAME}|"[^"]+")\\s+on\\s+(${QUALIFIED_NAME})`,
           'i',
         ).exec(flat);
         if (policy) {
-          const cmd = /\bfor\s+(all|select|insert|update|delete)\b/i.exec(flat)?.[1]?.toUpperCase() ?? 'ALL';
-          const toClause = /\bto\s+([a-z_",\s]+?)(?:\s+using\b|\s+with\s+check\b|$)/i.exec(flat)?.[1];
-          const roles = toClause
-            ? toClause.split(',').map((r) => r.trim().replace(/^"(.*)"$/, '$1').toLowerCase()).filter(Boolean)
-            : ['public'];
+          const parsed = parsePolicyTail(flat.slice(policy[0].length));
           policies.push({
             name: policy[1]!.replace(/^"(.*)"$/, '$1'),
             table: normaliseTable(policy[2]!),
-            command: cmd,
-            roles,
-            permissive: !/\bas\s+restrictive\b/i.test(flat),
-            using: clauseAfter(text, /\busing\s*(?=\()/i),
-            withCheck: clauseAfter(text, /\bwith\s+check\s*(?=\()/i),
             file: relPath,
             line: stmt.line,
+            ...parsed,
           });
           continue;
         }
@@ -397,13 +598,19 @@ export const rlsScanner: Scanner = {
         continue;
       }
 
-      if (tablePolicies.length === 0) {
+      // RESTRICTIVE policies are AND-ed onto the permissive ones and never grant
+      // a row by themselves; with none permissive, RLS denies everything.
+      const grantingPolicies = tablePolicies.filter((p) => p.permissive);
+
+      if (grantingPolicies.length === 0) {
         findings.push({
           id: 'CTS011',
           severity: 'low',
           title: 'RLS enabled but no policy defined',
           detail:
-            `Table \`${table.name}\` has RLS on and no policies, so PostgreSQL denies every row to every ` +
+            `Table \`${table.name}\` has RLS on and ` +
+            (tablePolicies.length > 0 ? 'only restrictive policies, which grant nothing on their own' : 'no policies') +
+            ', so PostgreSQL denies every row to every ' +
             'non-superuser role. This is fail-closed and therefore safe, but it usually means a feature ' +
             'silently returns empty results.',
           fix: 'Add the policies this table needs, or confirm it is only ever reached via a service-role client.',
@@ -419,13 +626,20 @@ export const rlsScanner: Scanner = {
       const sensitive = table.columns.filter((c) =>
         SENSITIVE_COLUMNS.some((s) => c === s || c.includes(s)),
       );
+      // Tenant isolation means comparing a row to *who* the caller is: auth.uid(),
+      // a JWT claim, or the request claims. `auth.role() = 'authenticated'` only
+      // says the caller is signed in — every signed-in user then sees every
+      // row, which is exactly what CTS014 is about — so it does not count.
       const referencesAuth = tablePolicies.some((p) =>
-        /auth\.uid\(\)|auth\.jwt\(\)|current_setting\s*\(|auth\.role\(\)/i.test(
+        /auth\.uid\(\)|auth\.jwt\(\)|current_setting\s*\(/i.test(
           `${p.using ?? ''} ${p.withCheck ?? ''}`,
         ),
       );
+      // A policy that only admits the service role reaches no end user (and the
+      // service role bypasses RLS anyway), so it cannot leak rows across users.
+      const reachesUsers = grantingPolicies.some((p) => !serviceRoleOnly(p));
 
-      if (ownerColumn && !referencesAuth) {
+      if (ownerColumn && !referencesAuth && reachesUsers) {
         findings.push({
           id: 'CTS014',
           severity: 'high',
@@ -453,7 +667,8 @@ export const rlsScanner: Scanner = {
         if (!publicFacing) continue;
         const anonFacing = p.roles.some((r) => UNAUTHENTICATED_ROLES.has(r));
         const isWrite = p.command !== 'SELECT';
-        const permissive = isAlwaysTrue(p.using) || isAlwaysTrue(p.withCheck);
+        // An always-true RESTRICTIVE policy is a no-op filter, not a grant.
+        const permissive = p.permissive && (isAlwaysTrue(p.using) || isAlwaysTrue(p.withCheck));
 
         if (permissive && isWrite) {
           findings.push({
@@ -565,7 +780,7 @@ export const rlsScanner: Scanner = {
     // Supabase Storage listing: a broad SELECT policy on storage.objects lets a
     // caller enumerate every file in every bucket, public or not (splinter 0025).
     for (const p of policies) {
-      if (p.table !== 'storage.objects') continue;
+      if (p.table !== 'storage.objects' || !p.permissive) continue;
       if (p.command !== 'SELECT' && p.command !== 'ALL') continue;
       if (!p.roles.some((r) => UNAUTHENTICATED_ROLES.has(r))) continue;
       const predicate = `${p.using ?? ''} ${p.withCheck ?? ''}`;
