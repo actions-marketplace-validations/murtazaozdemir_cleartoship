@@ -747,8 +747,22 @@ interface ActionInfo {
   effectCalls: string[];
   /** A signature check that authenticates the caller wherever the route lives. */
   verifiesSignature: boolean;
+  /**
+   * The only use of the session is to turn signed-in callers away
+   * (`if (session) redirect('/')`): reachable by every signed-out caller, by design.
+   */
+  guestOnly: boolean;
   /** Wrappers credited on their name alone — their source was not read. */
   nameOnlyWrappers: WrapperVerdict[];
+  /** What in this function a guest-only flow would have no business doing. */
+  privilege: {
+    /** A privilege field set to something a fresh sign-up should not get: `role: 'ADMIN'`. */
+    escalation: string | null;
+    /** Tables written that are not account tables (`?` when the table could not be told). */
+    tables: string[];
+    /** Calls that are none of: inert, a guest-flow call, a write judged by its table. */
+    calls: string[];
+  };
 }
 
 function analyseFunction(
@@ -809,7 +823,9 @@ function analyseFunction(
     aiCalls: 0,
     effectCalls: [],
     verifiesSignature: false,
+    guestOnly: false,
     nameOnlyWrappers: [],
+    privilege: { escalation: null, tables: [], calls: [] },
   };
 
   // An id the caller passed in is not proof of ownership — it is the IDOR.
@@ -999,6 +1015,8 @@ function analyseFunction(
   const authEvents: any[] = [];
   /** Every write, as the path of the call that makes it. */
   const mutationPaths: any[] = [];
+  /** Calls a guest-only flow does not make by design (writes are filtered out after the walk). */
+  const guestCandidates: any[] = [];
 
   /** `admin.auth().deleteUser(uid)`: the method a call's result is immediately used for. */
   const methodCalledOnResult = (p: any): string | null => {
@@ -1033,6 +1051,7 @@ function analyseFunction(
     const isAiCall = AI_CALLS.test(full);
     if (isAiCall) info.aiCalls++;
     else if (!isInertCall(full, tail) && !info.effectCalls.includes(full)) info.effectCalls.push(full);
+    if (!isAiCall && !isInertCall(full, tail) && !isGuestFlowCall(full, tail)) guestCandidates.push(inner);
     // `requireVerifiedActor(req.headers, 'read')`, `authorizeRequest(request)`: an
     // authorisation verb handed the request. Only the pair counts — `requireEnv()` or
     // `ensureDirectory(path)` is not handed a request to check.
@@ -1302,7 +1321,103 @@ function analyseFunction(
     if (VALIDATION_CALLS.has(wrapper.slice(wrapper.lastIndexOf('.') + 1))) info.hasValidation = true;
   });
 
+  // Nothing authenticates, and a session WAS read — only to turn signed-in callers away.
+  info.guestOnly = !info.hasAuth && inverted.length > 0;
+  // What it does, for deciding whether public-by-design is believable (see handle()).
+  if (!info.hasAuth) {
+    const written = new Set(mutationPaths.map((m) => m.node));
+    for (const c of guestCandidates) {
+      if (written.has(c.node)) continue;
+      const name = calleeName(c.node.callee) || '(anonymous call)';
+      if (!info.privilege.calls.includes(name)) info.privilege.calls.push(name);
+    }
+    for (const m of mutationPaths) {
+      const n = m.node;
+      let table: string | null;
+      if (n.type === 'TaggedTemplateExpression') {
+        table = sqlTable(n.quasi.quasis.map((q: any) => q.value.raw).join(' '));
+      } else {
+        const sql = (n.arguments ?? [])
+          .map((a: any) => (a?.type === 'StringLiteral' ? a.value : a?.type === 'TemplateLiteral' ? a.quasis.map((q: any) => q.value.raw).join(' ') : ''))
+          .join(' ');
+        table = /\b(insert\s+into|update\s+|delete\s+from)/i.test(sql) ? sqlTable(sql) : mutationTable(n);
+      }
+      const label = table ?? '?';
+      if ((table === null || !ACCOUNT_TABLE.test(table)) && !info.privilege.tables.includes(label)) {
+        info.privilege.tables.push(label);
+      }
+    }
+    info.privilege.escalation = privilegeEscalation(path, isCallerName, new Set(mutationPaths.map((m) => m.node)));
+  }
+
   return info;
+}
+
+/**
+ * `role: 'ADMIN'`, `isAdmin: true`, `user.role = role`: a privilege field given a value a
+ * fresh account should not get, or one the caller chose. Anywhere in the function except a
+ * query filter — `where: { role: 'admin' }` reads, it does not grant.
+ */
+function privilegeEscalation(
+  path: any,
+  isCallerName: (id: string) => boolean,
+  written: ReadonlySet<any>,
+): string | null {
+  let found: string | null = null;
+  /**
+   * Whether an object literal can reach a write: it sits in a write's arguments (or a
+   * `.values()` / `.set()` chained on one), or is bound to a name first
+   * (`const data = { role }; create({ data })`). Not a response body, not a return
+   * value: `NextResponse.json({ user: { role: user.role } })` after a login grants nothing.
+   */
+  const reachesWrite = (p: any): boolean => {
+    let cur = p.parentPath;
+    while (cur && cur.node !== path.node) {
+      const t = cur.node.type;
+      if (t === 'CallExpression' || t === 'OptionalCallExpression' || t === 'NewExpression') {
+        return written.has(cur.node) || someNode(cur.node.callee, (n) => written.has(n));
+      }
+      if (t === 'VariableDeclarator' || t === 'AssignmentExpression') return true;
+      if (t === 'ReturnStatement' || t === 'ArrowFunctionExpression' || t === 'FunctionExpression' || t === 'ThrowStatement') return false;
+      cur = cur.parentPath;
+    }
+    return false;
+  };
+  const judge = (key: string, value: any, at: any) => {
+    if (found || !PRIVILEGE_KEY.test(key)) return;
+    // `const role = 'member'; ... { role }` — a local constant is judged by its value.
+    if (value?.type === 'Identifier' && !isCallerName(value.name)) {
+      const binding = at.scope?.getBinding?.(value.name);
+      const init = binding?.kind === 'const' ? binding.path?.node?.init : null;
+      if (init) value = init;
+    }
+    // A caller-chosen value is escalation whatever it is; anything else unrecognised is too.
+    if (value && mentions(value, isCallerName)) found = `${key}: <caller-supplied>`;
+    else if (!isBenignPrivilegeValue(value)) found = snippetOf(key, value);
+  };
+  path.traverse({
+    ObjectProperty(inner: any) {
+      if (inner.node.computed) return;
+      const inFilter = inner.findParent(
+        (q: any) => q.node?.type === 'ObjectProperty' && FILTER_KEYS.has(propertyKey(q.node)),
+      );
+      if (inFilter || !reachesWrite(inner)) return;
+      judge(propertyKey(inner.node), inner.node.value, inner);
+    },
+    AssignmentExpression(inner: any) {
+      const left = inner.node.left;
+      if (left?.type !== 'MemberExpression' || left.computed) return;
+      judge(left.property?.name ?? '', inner.node.right, inner);
+    },
+  });
+  return found;
+}
+
+function snippetOf(key: string, value: any): string {
+  if (value?.type === 'StringLiteral') return `${key}: '${value.value}'`;
+  if (value?.type === 'BooleanLiteral' || value?.type === 'NumericLiteral') return `${key}: ${value.value}`;
+  const name = value ? calleeName(value) : '';
+  return name ? `${key}: ${name}` : `${key}: <computed>`;
 }
 
 /**
@@ -1319,6 +1434,180 @@ const WRITE_PAYLOAD_KEYS = new Set(['data', 'values', 'set', 'create', 'update',
 const PAYLOAD_PRESERVING_CALLS = new Set([
   'parse', 'parseAsync', 'safeParse', 'safeParseAsync', 'validate', 'validateSync', 'cast',
 ]);
+
+/*
+ * ---------------------------------------------------------------- guest-only actions
+ *
+ * `const session = await auth(); if (session) redirect('/dashboard')` in a sign-up,
+ * sign-in or forgot-password action reads the session only to turn signed-in callers
+ * away. It is public by design, like a sign-in route, and was a CTS001 critical. It is
+ * reported low — but only when what it does is what such a flow does: write the account
+ * tables, hash a password, send an email. A name list alone once hid two real bugs here
+ * (`register` hardcoding an Admin role; `leads` running paid enrichment), so the
+ * downgrade is decided on the writes and calls themselves, and anything this cannot
+ * positively recognise keeps the full severity.
+ */
+
+/** Tables a sign-up / sign-in / password-reset flow writes by design. */
+const ACCOUNT_TABLE =
+  /^(users?|user_?profiles?|profiles?|accounts?|user_?accounts?|sessions?|user_?sessions?|verification_?tokens?|verifications?|email_?verifications?(_?tokens?)?|(password_?)?reset_?tokens?|password_?resets?|password_?reset_?requests?|magic_?links?|login_?tokens?|otps?|otp_?codes?|one_?time_?(codes?|tokens?|passwords?))$/i;
+
+/** `usersTable`, `schema.users`, `UserModel`, `"public"."users"` -> `users`, `User` -> `user`. */
+function tableKey(raw: string): string {
+  const last = raw.replace(/["'`]/g, '').split('.').pop() ?? '';
+  return last.replace(/(Table|_table|Tbl|Schema|Model|Collection|Repo|Repository)$/, '');
+}
+
+/** Fields whose value decides what a user may do. */
+const PRIVILEGE_KEY =
+  /^(roles?|user_?roles?|is_?admin|admin|is_?super_?(admin|user)?|super_?user|is_?staff|permissions?|scopes?|access_?level|privileges?|is_?owner|plan|tier|subscription_?(tier|plan))$/i;
+
+/** A value for one of those that grants more than a fresh sign-up should get. */
+const PRIVILEGED_VALUE =
+  /^(.*admin.*|owner|super.*|staff|root|manager|moderator|mod|editor|pro|premium|enterprise|unlimited|business|paid|lifetime|all|\*|write|full|god)$/i;
+
+/** True when `v`, written to a privilege field, provably grants nothing special. */
+function isBenignPrivilegeValue(v: any, depth = 0): boolean {
+  if (!v || depth > 4) return false;
+  switch (v.type) {
+    case 'BooleanLiteral':
+      return v.value === false;
+    case 'NullLiteral':
+      return true;
+    case 'NumericLiteral':
+      return v.value === 0;
+    case 'Identifier':
+      return v.name === 'undefined';
+    case 'StringLiteral':
+      return !PRIVILEGED_VALUE.test(v.value.trim());
+    case 'TemplateLiteral':
+      return v.expressions.length === 0 && !PRIVILEGED_VALUE.test(v.quasis.map((q: any) => q.value.cooked ?? '').join('').trim());
+    case 'ArrayExpression':
+      return v.elements.every((e: any) => isBenignPrivilegeValue(e, depth + 1));
+    case 'ObjectExpression':
+      return v.properties.length === 0;
+    // `Role.USER`, `UserRole.Member` — an enum member, judged by its name.
+    case 'MemberExpression':
+      return !v.computed && v.property?.type === 'Identifier' && /^[A-Z]/.test(calleeName(v)) && !PRIVILEGED_VALUE.test(v.property.name);
+    case 'ConditionalExpression':
+      return isBenignPrivilegeValue(v.consequent, depth + 1) && isBenignPrivilegeValue(v.alternate, depth + 1);
+    case 'TSAsExpression':
+    case 'TSSatisfiesExpression':
+    case 'TSNonNullExpression':
+      return isBenignPrivilegeValue(v.expression, depth + 1);
+    default:
+      return false;
+  }
+}
+
+/** Keys under which an object is a query filter, not a write: `where: { role: 'admin' }`. */
+const FILTER_KEYS = new Set(['where', 'filter', 'select', 'include', 'orderBy', 'omit', 'query', 'match']);
+
+/**
+ * The table a write goes to, or null when it cannot be told. Prisma `db.user.create`,
+ * Supabase `from('profiles').insert`, Drizzle `db.insert(users)`, Mongo
+ * `db.collection('users').insertOne`, Mongoose `User.create` / `user.save()`.
+ */
+function mutationTable(call: any): string | null {
+  const callee = call.callee;
+  if (callee?.type !== 'MemberExpression' && callee?.type !== 'OptionalMemberExpression') return null;
+  const tail = calleeTail(callee);
+  // `from('profiles')` / `collection('users')` / `table('users')` somewhere up the chain.
+  let cur = callee.object;
+  for (let guard = 0; cur && guard < 12; guard++) {
+    if (cur.type === 'CallExpression' || cur.type === 'OptionalCallExpression') {
+      const t = calleeTail(cur.callee);
+      const arg = cur.arguments?.[0];
+      if (/^(from|collection|table|into)$/.test(t) && arg?.type === 'StringLiteral') return tableKey(arg.value);
+      cur = cur.callee;
+      continue;
+    }
+    if (cur.type === 'MemberExpression' || cur.type === 'OptionalMemberExpression') {
+      cur = cur.object;
+      continue;
+    }
+    break;
+  }
+  // Drizzle: `db.insert(users)`, `tx.update(schema.users)`, `db.delete(sessions)`.
+  const first = call.arguments?.[0];
+  if (/^(insert|update|delete)$/.test(tail) && (first?.type === 'Identifier' || first?.type === 'MemberExpression')) {
+    const receiver = calleeName(callee.object);
+    if (/^(db|tx|trx|database|drizzle|client|conn)$|\.db$/.test(receiver)) return tableKey(calleeName(first));
+  }
+  // Prisma / Mongoose: the segment before the verb.
+  const full = calleeName(callee);
+  const segs = full.split('.');
+  if (segs.length >= 2) {
+    const before = segs[segs.length - 2]!;
+    if (!/^(db|prisma|tx|trx|client|database|\$transaction|this|\*)$/.test(before)) return tableKey(before);
+  }
+  return null;
+}
+
+/** Table named in raw SQL: `INSERT INTO users`, `UPDATE "public"."profiles"`, `DELETE FROM sessions`. */
+function sqlTable(text: string): string | null {
+  const m = /\b(?:insert\s+into|update|delete\s+from)\s+((?:["`]?\w+["`]?\.)?["`]?\w+["`]?)/i.exec(text);
+  return m ? tableKey(m[1]!) : null;
+}
+
+/**
+ * Calls a guest-only flow makes by design, judged by name: reading, the auth provider's
+ * own sign-up / sign-in / reset calls, password hashing and token generation, sending
+ * the confirmation email, rate limiting and captcha, cache revalidation. A write to an
+ * account table (named like Prisma's `db.user.create`) is one too; any other write is not.
+ */
+const GUEST_FLOW_TAILS = new Set([
+  // Reads and query-builder links.
+  'findUnique', 'findUniqueOrThrow', 'findFirst', 'findFirstOrThrow', 'findMany', 'findOne', 'findById',
+  'count', 'exists', 'select', 'from', 'eq', 'neq', 'ilike', 'like', 'match', 'where', 'limit', 'single',
+  'maybeSingle', 'returning', 'values', 'set', 'onConflictDoNothing', 'onConflictDoUpdate', 'first',
+  'all', 'then', 'execute', 'executeTakeFirst', 'lean', 'exec',
+  // The auth provider's own flow.
+  'signIn', 'signUp', 'signOut', 'signUpEmail', 'signInEmail', 'signInWithPassword', 'signInWithOtp',
+  'signInWithOAuth', 'resetPasswordForEmail', 'verifyOtp', 'exchangeCodeForSession', 'forgetPassword',
+  'requestPasswordReset', 'resetPassword', 'sendVerificationEmail', 'createSession', 'createSessionCookie',
+  'createBlankSessionCookie', 'invalidateSession', 'setSession',
+  // Hashing and token generation.
+  'hash', 'hashSync', 'genSalt', 'genSaltSync', 'compare', 'compareSync', 'verify', 'hashPassword',
+  'verifyPassword', 'randomBytes', 'randomUUID', 'randomInt', 'getRandomValues', 'nanoid', 'uuid', 'uuidv4',
+  'v4', 'v7', 'createId', 'cuid', 'generateId', 'generateToken', 'generateRandomString', 'sign',
+  'setProtectedHeader', 'setExpirationTime', 'setIssuedAt', 'digest', 'toString',
+  // Next.js plumbing.
+  'revalidatePath', 'revalidateTag', 'cookies', 'headers', 'redirect', 'permanentRedirect', 'notFound',
+  'after',
+]);
+
+function isGuestFlowCall(full: string, tail: string): boolean {
+  if (!full) return false;
+  if (matchesAny(full, AUTH_CALLS)) return true;
+  if (/(^|\.)auth\.(api\.)?\w+$/.test(full)) return true; // supabase.auth.*, better-auth's auth.api.*
+  if (/^(bcrypt|bcryptjs|argon2|crypto|scrypt|jose|jwt)\./.test(full)) return true;
+  if (/rate_?limit|ratelimit|throttle|captcha|turnstile/i.test(full)) return true;
+  if (VALIDATION_CALLS.has(tail)) return true;
+  // Getting the client the writes go through: `createClient()`, `createServerClient(...)`.
+  if (/^(create\w*Client|getSupabase\w*|getDb|getPrisma)$/.test(tail)) return true;
+  // The confirmation / reset email: `resend.emails.send`, `transporter.sendMail`, `sendResetEmail`.
+  if (/^send\w*(e?mail)$/i.test(tail) || /(^|\.)(emails?|resend|mail|mailer|transporter|nodemailer|sendgrid|sgMail|postmark|ses)\.send\w*$/i.test(full)) {
+    return true;
+  }
+  // `cookies().set(...)`, `cookieStore.delete(...)`.
+  if (/(^|\.)(cookies|cookieStore)\.(set|delete|get)$/.test(full)) return true;
+  if (MUTATION_CALLS.has(tail)) {
+    const segs = full.split('.');
+    return segs.length >= 2 && ACCOUNT_TABLE.test(tableKey(segs[segs.length - 2]!));
+  }
+  // Drizzle's `db.update(users).set({...})`: the update itself is judged as a write.
+  if (tail === 'set') return /\.update\.set$/.test(full);
+  return GUEST_FLOW_TAILS.has(tail);
+}
+
+/**
+ * Calls that spend money or reach a paid third party on the caller's say-so: payment,
+ * lead enrichment, SMS. Used for routes whose NAME says public intake, where any other
+ * unrecognised call is normal and cannot be held against it.
+ */
+const PAID_CALL =
+  /stripe|checkout|payment|paypal|paddle|lemon_?squeezy|braintree|\bcharge|enrich|apollo|clearbit|hunter|peopledatalabs|proxycurl|zoominfo|lusha|snov|dropcontact|rocketreach|twilio|\bsms/i;
 
 function propertyKey(prop: any): string {
   const key = prop?.key;
@@ -1376,6 +1665,16 @@ export const serverActionsScanner: Scanner = {
 
     const effectOptions = {
       isInert: isInertCall,
+      index: helperOptions.index,
+      cache: new Map<string, ReadonlySet<string>>(),
+    };
+
+    // First-party helpers that only do what a guest-only flow does (see isGuestFlowCall):
+    // the same whole-body fixed point as the inert helpers, with a wider whitelist.
+    // An LLM call is inert for the method-only question, but not here — it costs money.
+    const guestFlowOptions = {
+      isInert: (full: string, tail: string) =>
+        !AI_CALLS.test(full) && (isInertCall(full, tail) || isGuestFlowCall(full, tail)),
       index: helperOptions.index,
       cache: new Map<string, ReadonlySet<string>>(),
     };
@@ -1526,13 +1825,41 @@ export const serverActionsScanner: Scanner = {
         const verifiedWebhook = isWebhook && info.hasSignatureCheck;
         const authenticated = info.hasAuth || secretAuth || verifiedWebhook || info.verifiesSignature;
 
+        // Public by design — a sign-in / intake route by its name, or an action that reads the
+        // session only to turn signed-in callers away — is reported low. Unless it does
+        // something such a flow has no business doing for a stranger: grant a role, write
+        // somewhere other than the account tables, spend money. Then it is what it looks like.
+        const guestOnly = info.guestOnly && !intentionallyPublic;
+        const reasons: string[] = [];
+        if (writes && !authenticated && (intentionallyPublic || guestOnly)) {
+          const { escalation, tables } = info.privilege;
+          if (escalation) reasons.push(`sets \`${escalation}\``);
+          if (intentionallyPublic) {
+            const paid = info.privilege.calls.filter((c) => PAID_CALL.test(c));
+            if (paid.length) reasons.push(`calls \`${paid.slice(0, 3).join('`, `')}\``);
+          } else {
+            if (info.wholePayloadLine !== null || info.spreadLine !== null) reasons.push("writes the caller's object whole");
+            const other = tables.filter((t) => t !== '?');
+            if (other.length) reasons.push(`writes to \`${other.slice(0, 3).join('`, `')}\``);
+            else if (tables.includes('?')) reasons.push('writes somewhere this cannot tell is an account table');
+            const safe = info.privilege.calls.length ? inertNamesFor(file, guestFlowOptions, ast) : new Set<string>();
+            const calls = info.privilege.calls.filter((c) => !safe.has(c));
+            if (calls.length) reasons.push(`calls \`${calls.slice(0, 3).join('`, `')}\``);
+            if (info.aiCalls > 0) reasons.push('calls an LLM provider');
+          }
+        }
+        const publicByDesign = (intentionallyPublic || guestOnly) && reasons.length === 0;
+        const listed = reasons.length > 1 ? `${reasons.slice(0, -1).join(', ')} and ${reasons[reasons.length - 1]}` : reasons[0];
+
         if (writes && !authenticated && info.getSessionLine === null) {
           push({
             id: 'CTS001',
-            severity: intentionallyPublic ? 'low' : info.hasMutation ? 'critical' : 'high',
-            title: intentionallyPublic
-              ? `${kind} is unauthenticated (appears public by design)`
-              : `Missing ${kind} authorization`,
+            severity: publicByDesign ? 'low' : info.hasMutation ? 'critical' : 'high',
+            title: !publicByDesign
+              ? `Missing ${kind} authorization`
+              : guestOnly
+                ? `${kind} is reachable by signed-out callers (guest-only by design)`
+                : `${kind} is unauthenticated (appears public by design)`,
             detail:
               `${kind} \`${name}\` ` +
               (info.hasMutation
@@ -1541,9 +1868,15 @@ export const serverActionsScanner: Scanner = {
                   'is visible in the handler itself, so this is judged on the method alone — a ' +
                   'read-only endpoint here is a lower risk than the severity suggests. ') +
               exposure +
-              (intentionallyPublic
-                ? ' This route name suggests a sign-in / account-recovery or public-intake endpoint, which is unauthenticated by design — confirm it has rate limiting and does not trust caller-supplied identifiers.'
-                : ''),
+              (publicByDesign && guestOnly
+                ? ' It reads the session only to turn signed-in callers away, so anyone who is signed out reaches it — by design for a sign-up, sign-in or password-reset flow, and everything it visibly does is what such a flow does. Review what it writes, and confirm it is rate limited and does not trust a caller-supplied role or identifier.'
+                : publicByDesign
+                  ? ' This route name suggests a sign-in / account-recovery or public-intake endpoint, which is unauthenticated by design — confirm it has rate limiting and does not trust caller-supplied identifiers.'
+                  : guestOnly && reasons.length
+                    ? ` It reads the session only to turn signed-in callers away, so every signed-out caller reaches it — and it ${listed}, which a sign-up or sign-in flow has no reason to do for a stranger.`
+                    : intentionallyPublic && reasons.length
+                      ? ` The route name suggests a public sign-in or intake endpoint, but it ${listed}, so it is reported at full severity.`
+                      : ''),
             fix:
               'Resolve and check the session before touching the database, e.g.\n' +
               '  const { data: { user } } = await supabase.auth.getUser()\n' +
@@ -1553,7 +1886,7 @@ export const serverActionsScanner: Scanner = {
             line: info.mutationLine ?? info.line,
             cwe: 'CWE-306: Missing Authentication for Critical Function',
             owasp: 'A01:2025 - Broken Access Control',
-            meta: { action: name, kind },
+            meta: { action: name, kind, ...(info.guestOnly ? { guestOnly: true } : {}) },
           });
         }
 

@@ -6,10 +6,17 @@ import { join, dirname } from 'node:path';
 
 import { scan } from '../dist/index.js';
 
-// A limit the 2026-09-23 audit left on purpose, now closed: auth wrappers were credited
-// by NAME. `withIronSessionApiRoute` matched /session/ and counted as authenticated,
-// though iron-session attaches a session and lets every caller through. Wrappers are now
-// read (first-party) or looked up (third-party).
+// Two limits the 2026-09-23 audit left on purpose, now closed:
+//
+// 1. Auth wrappers were credited by NAME. `withIronSessionApiRoute` matched /session/ and
+//    counted as authenticated, though iron-session attaches a session and lets every
+//    caller through. Wrappers are now read (first-party) or looked up (third-party).
+// 2. An action that reads the session only to turn signed-in users away
+//    (`if (session) redirect('/dashboard')`) became a CTS001 critical in the audit. It is
+//    now low when what it does is what a sign-up flow does — and stays critical when it
+//    grants a role, writes elsewhere or spends money. A name list once hid exactly that
+//    (`register` hardcoding an Admin role; `leads` running paid enrichment), so both
+//    shapes are pinned here.
 
 const IDS = /^CTS0(0[1-4]|4[1-6])$/;
 
@@ -229,4 +236,189 @@ test('a next-safe-action client is followed: its middleware decides, not its nam
     ],
   });
   assert.deepEqual(found, ['CTS001:critical:app/actions.ts:deleteAny']);
+});
+
+// ---------------------------------------------------------------- 2. guest-only actions
+
+test('a sign-up or password-reset action that only turns signed-in users away is low, not critical', async () => {
+  const { found, result } = await scanApp({
+    'app/(auth)/actions.ts': [
+      "'use server'",
+      "import bcrypt from 'bcryptjs'",
+      "import { randomBytes } from 'node:crypto'",
+      "import { redirect } from 'next/navigation'",
+      "import { auth } from '@/auth'",
+      'export async function signup(formData: FormData) {',
+      '  const session = await auth()',
+      "  if (session) redirect('/dashboard')",
+      "  const hash = await bcrypt.hash(String(formData.get('password')), 10)",
+      "  await db.user.create({ data: { email: String(formData.get('email')), password: hash, role: 'USER' } })",
+      "  redirect('/login')",
+      '}',
+      'export async function forgotPassword(formData: FormData) {',
+      '  const session = await auth()',
+      "  if (session) redirect('/')",
+      "  const email = String(formData.get('email'))",
+      "  const token = randomBytes(32).toString('hex')",
+      '  await db.passwordResetToken.create({ data: { email, token } })',
+      "  await resend.emails.send({ to: email, subject: 'Reset', html: token })",
+      '}',
+    ],
+    'app/(auth)/supabase.ts': [
+      "'use server'",
+      "import { createClient } from '@/utils/supabase/server'",
+      'export async function register(formData: FormData) {',
+      '  const supabase = await createClient()',
+      '  const { data: { user } } = await supabase.auth.getUser()',
+      "  if (user) return { error: 'already signed in' }",
+      "  const { data } = await supabase.auth.signUp({ email: String(formData.get('email')), password: String(formData.get('password')) })",
+      "  await supabase.from('profiles').insert({ id: data.user.id, full_name: String(formData.get('name')) })",
+      '}',
+    ],
+    'auth.ts': ["import NextAuth from 'next-auth'", 'export const { auth } = NextAuth({ providers: [] })'],
+  });
+  assert.deepEqual(found, [
+    'CTS001:low:app/(auth)/actions.ts:forgotPassword',
+    'CTS001:low:app/(auth)/actions.ts:signup',
+    'CTS001:low:app/(auth)/supabase.ts:register',
+  ]);
+  const f = result.findings.find((x) => x.meta?.action === 'signup');
+  assert.match(f.title, /reachable by signed-out callers/);
+  assert.match(f.detail, /by design/);
+});
+
+test('`register` hardcoding an Admin role stays critical — as an action and as a route named for sign-up', async () => {
+  const { found, result } = await scanApp({
+    'app/actions.ts': [
+      "'use server'",
+      "import { redirect } from 'next/navigation'",
+      'export async function register(formData: FormData) {',
+      '  const session = await auth()',
+      "  if (session) redirect('/')",
+      "  await db.user.create({ data: { email: String(formData.get('email')), role: 'ADMIN' } })",
+      '}',
+      // The role the caller chose is the same bug with one more step.
+      'export async function registerAs(formData: FormData) {',
+      '  const session = await auth()',
+      "  if (session) redirect('/')",
+      "  const role = String(formData.get('role'))",
+      "  await db.user.create({ data: { email: String(formData.get('email')), role } })",
+      '}',
+      'export async function registerEnum(formData: FormData) {',
+      '  const session = await auth()',
+      "  if (session) redirect('/')",
+      "  await db.user.create({ data: { email: String(formData.get('email')), role: Role.SUPER_ADMIN, isAdmin: true } })",
+      '}',
+    ],
+    // The name-list heuristic: /register/ made this low, whatever it wrote.
+    'app/api/register/route.ts': [
+      'export async function POST(req: Request) {',
+      '  const { email, password } = await req.json()',
+      "  await prisma.user.create({ data: { email, password, role: 'Admin' } })",
+      '  return Response.json({ ok: true })',
+      '}',
+    ],
+  });
+  assert.deepEqual(found, [
+    'CTS001:critical:app/actions.ts:register',
+    'CTS001:critical:app/actions.ts:registerAs',
+    'CTS001:critical:app/actions.ts:registerEnum',
+    'CTS001:critical:app/api/register/route.ts:POST',
+  ]);
+  const f = result.findings.find((x) => x.meta?.action === 'register');
+  assert.match(f.detail, /role: 'ADMIN'/);
+});
+
+test('`leads` running paid enrichment stays critical — as an action and as a route named for intake', async () => {
+  const { found } = await scanApp({
+    'lib/enrich.ts': [
+      'export async function enrichLead(email: string) {',
+      "  const res = await fetch('https://api.apollo.io/v1/people/match', { method: 'POST', body: JSON.stringify({ email }) })",
+      '  return res.json()',
+      '}',
+    ],
+    'app/actions.ts': [
+      "'use server'",
+      "import { enrichLead } from '@/lib/enrich'",
+      'export async function captureLead(formData: FormData) {',
+      '  const session = await auth()',
+      "  if (session) return { ok: true }",
+      "  const email = String(formData.get('email'))",
+      '  const person = await enrichLead(email)',
+      '  await db.lead.create({ data: { email, company: person.company } })',
+      '}',
+      // Even writing only the users table, a paid call on a stranger's say-so is not a sign-up.
+      'export async function signupAndEnrich(formData: FormData) {',
+      '  const session = await auth()',
+      "  if (session) return { ok: true }",
+      "  const email = String(formData.get('email'))",
+      '  await db.user.create({ data: { email } })',
+      '  await enrichLead(email)',
+      '}',
+    ],
+    'app/api/leads/route.ts': [
+      "import { enrichLead } from '@/lib/enrich'",
+      'export async function POST(req: Request) {',
+      '  const { email } = await req.json()',
+      '  const person = await enrichLead(email)',
+      '  await db.lead.create({ data: { email, company: person.company } })',
+      '  return Response.json({ ok: true })',
+      '}',
+    ],
+    // A plain intake form keeps the name-based low.
+    'app/api/contact/route.ts': [
+      'export async function POST(req: Request) {',
+      '  const { email, message } = await req.json()',
+      '  await db.message.create({ data: { email, message } })',
+      '  return Response.json({ ok: true })',
+      '}',
+    ],
+  });
+  assert.deepEqual(found, [
+    'CTS001:critical:app/actions.ts:captureLead',
+    'CTS001:critical:app/actions.ts:signupAndEnrich',
+    'CTS001:low:app/api/contact/route.ts:POST',
+    'CTS001:critical:app/api/leads/route.ts:POST',
+  ].sort());
+});
+
+test('a role echoed back in a login response is not a role granted', async () => {
+  // Real shape (a sign-in route on one of the calibration repos): the first cut read the
+  // response body's `role: user.role` as a privilege write and made the login route high.
+  const { found } = await scanApp({
+    'app/api/auth/login/route.ts': [
+      "import { verifyCredentials } from '@/lib/users'",
+      'export async function POST(req: Request) {',
+      '  const { email, password } = await req.json()',
+      '  const user = await verifyCredentials(email, password)',
+      "  if (!user) return Response.json({ error: 'bad' }, { status: 401 })",
+      "  await db.auditLog.create({ data: { action: 'login', email } })",
+      '  return Response.json({ user: { id: user.id, role: user.role } })',
+      '}',
+    ],
+  });
+  assert.deepEqual(found, ['CTS001:low:app/api/auth/login/route.ts:POST']);
+});
+
+test('a guest-only action writing a non-account table, or its payload whole, keeps full severity', async () => {
+  const { found } = await scanApp({
+    'app/actions.ts': [
+      "'use server'",
+      'export async function joinTeam(formData: FormData) {',
+      '  const session = await auth()',
+      "  if (session) redirect('/')",
+      "  await db.teamMember.create({ data: { teamId: String(formData.get('team')) } })",
+      '}',
+      'export async function signupRaw(input) {',
+      '  const session = await auth()',
+      "  if (session) redirect('/')",
+      '  await db.user.create({ data: input })',
+      '}',
+    ],
+  });
+  assert.deepEqual(found, [
+    'CTS001:critical:app/actions.ts:joinTeam',
+    'CTS001:critical:app/actions.ts:signupRaw',
+    'CTS002:high:app/actions.ts:signupRaw',
+  ]);
 });
