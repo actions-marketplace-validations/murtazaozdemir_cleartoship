@@ -10,7 +10,7 @@
     "check": "tsc --noEmit -p tsconfig.json"
   },
   "dependencies": {
-    "stripe": "^22.6.1"
+    "stripe": "^22.6.2"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^5.20260907.1",
