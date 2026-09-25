@@ -69,3 +69,31 @@ test('a placeholder written in words is not harvested as packages', () => {
   const plain = '```\nnpm install zod\n```';
   assert.deepEqual(collectProseForTest(plain, 'README.md').map((d) => d.name), ['zod']);
 });
+
+test('a 396 KB file of one identifier does not stall the gitleaks rules', async () => {
+  // gitleaks' cohere and private_ai patterns nest `[\w.-]{0,50}?` twice; on V8
+  // this file took ~10.8 s with the community ruleset off.
+  const root = project({ 'package.json': '{"name":"ident"}', 'lib/x.ts': 'a'.repeat(396_000) + '\n' });
+  const t = Date.now();
+  const result = await scan({ root, offline: true, noCommunity: true });
+  assert.ok(Date.now() - t < 3_000, `took ${Date.now() - t} ms`);
+  assert.deepEqual(result.incomplete, []);
+});
+
+test('two files with identical content both get their community and gitleaks findings', async () => {
+  // The linear matcher reused per-text state when the same text was searched
+  // again from the start, and found nothing the second time.
+  const body = "export function run(req: any) { return eval(req.query.code) }\n" +
+    'const t = "' + ['npm', '7Kq2Xv9Lp3Rt8Wm1Zb6Nc4Hd0Jf5Gs2Qy7Ua'].join('_') + '"\n';
+  const root = project({ 'package.json': '{"name":"twins"}', 'a/x.ts': body, 'b/x.ts': body });
+  for (let i = 0; i < 2; i++) {
+    const result = await scan({ root, offline: true });
+    for (const id of ['VG014', 'GL-npm-access-token']) {
+      assert.deepEqual(
+        result.findings.filter((f) => f.id === id).map((f) => f.file).sort(),
+        ['a/x.ts', 'b/x.ts'],
+        `${id} on scan ${i + 1}`,
+      );
+    }
+  }
+});

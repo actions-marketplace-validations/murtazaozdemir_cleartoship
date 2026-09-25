@@ -42,10 +42,19 @@ the CVE rules, `src/scan.ts`) rather than in the vendored files:
   with the AI SDK's `stopWhen` is not unbounded.
 - **3 rules are manifest-only** (`MANIFEST_ONLY`): they are not run over
   lockfiles, where they matched ordinary transitive package names.
-- **Some rule patterns are replaced at runtime** where the upstream regex can
-  backtrack catastrophically (ReDoS) on hostile input; the replacement matches
-  the same intended shape and each override is listed with its reason in
-  `src/scanners/community.ts`. The vendored file keeps the original pattern.
+- **Most rule patterns run on a linear-time matcher, not V8's regex engine.**
+  209 of the 435 active upstream patterns took over 50 ms on 400 KB of hostile
+  input and 125 over 8 s (`eval.*\(` alone: 50 s in one `exec`), so one crafted
+  file in a pull request could stall a scan. 382 of the 435 now run their
+  unchanged pattern through a memoizing matcher in `src/scanners/community.ts`
+  that returns the same matches, in the same order, as V8 would — verified with
+  0 differences over 27,391 matches in 129 MB of real code. 52 stay on V8
+  because they are provably linear there, and 1 (`VG1094`) because it needs a
+  backreference. 4 patterns (VG678, VG974, VG533, VG958) are additionally
+  replaced by bounded equivalents, each listed with its reason. The same
+  matcher runs the vendored gitleaks rules, two of which (`cohere`,
+  `private_ai`) nest bounded lazy repeats. The vendored files keep the original
+  patterns; a per-rule time budget remains as a last line of defence.
 - **A match inside a comment is dropped.** Nothing in the ruleset targets
   comment content, and a commented-out call is not a call.
 - **Severity adjustments**: a vendored CVE rule matching a package under

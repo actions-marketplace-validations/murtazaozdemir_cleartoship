@@ -12,6 +12,7 @@ import { shannonEntropy, redactCredential } from '../utils/entropy.js';
 import {
   GITLEAKS_RULES, GITLEAKS_STOPWORDS, GITLEAKS_ATTRIBUTION,
 } from '../vendor/gitleaks/rules.js';
+import { matcherFor } from './community.js';
 
 interface Pattern {
   id: string;
@@ -499,13 +500,18 @@ export const secretsScanner: Scanner = {
         if (rule.keywords.length > 0 && !rule.keywords.some((k) => lowerSource.includes(k))) {
           continue;
         }
-        rule.pattern.lastIndex = 0;
+        // Through the linear-time matcher community.ts runs vendored patterns
+        // on: gitleaks' `cohere` and `private_ai` nest `[\w.-]{0,50}?` inside
+        // `[\w.-]{0,50}?`, which cost V8 ~4.7 s each on a 396 KB file of one
+        // identifier. The matcher returns the same matches V8 would.
+        const re = matcherFor(rule.pattern);
+        re.lastIndex = 0;
         let g: RegExpExecArray | null;
         let hits = 0;
         const examined = { n: 0 };
-        while ((g = rule.pattern.exec(source)) !== null) {
+        while ((g = re.exec(source)) !== null) {
           if (g[0].length === 0) {
-            rule.pattern.lastIndex++;
+            re.lastIndex++;
             continue;
           }
           const secret = g[1] ?? g[0];
@@ -559,7 +565,7 @@ export const secretsScanner: Scanner = {
           });
           if (++hits >= MAX_HITS_PER_RULE) {
             // Peek: only claim there is more if there actually is.
-            if (rule.pattern.exec(source) !== null) truncated.add(relPath);
+            if (re.exec(source) !== null) truncated.add(relPath);
             break;
           }
         }

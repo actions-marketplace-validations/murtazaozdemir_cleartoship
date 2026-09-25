@@ -3,7 +3,9 @@
 Public backlog. Working notes, positioning and anything about other projects
 live in `NOTES.private.md`, which is gitignored and stays on my machine.
 
-_Current release: **v0.13.12** — fixes a sticky-PR-comment regression in
+_Current release: **v0.13.13** — linear-time matching for the vendored rules, one
+RLS schema per project, CTS014 per command, auth wrappers judged by behaviour.
+**v0.13.12** fixed a sticky-PR-comment regression in
 0.13.11's Action (a new comment on every run). **v0.13.11** shipped the
 2026-09-23 audit: incomplete scans exit 3, tracked files can no longer be hidden
 by `.gitignore`, and it is the first release with build-provenance attestations,
@@ -174,23 +176,55 @@ default token's 403 left `me` holding a JSON blob, no comment matched, and every
 run posted a new one. 0.13.12 tests the exit status instead. The test that
 caught it asserts exactly one comment, which is the assertion that could fail.
 
+**0.13.13 closed the limits the audit had left open on purpose, and the
+biggest one turned out to be six times larger than the audit thought.** The
+audit counted ~35 super-linear vendored patterns; fuzzing all 435 active rules
+on their own trigger words found 209 over 50 ms at 400 KB and 125 over 8 s —
+`eval.*\(` alone spent 50 s in one uninterruptible `exec`, and a 396 KB file of
+`eval` repeated kept 0.13.12 busy for more than 15 minutes. Rewriting 200
+patterns by hand was not credible, so the vendored patterns V8 backtracks on
+(382 of 435) now run on a memoizing matcher that takes V8's paths in V8's order
+and remembers every (state, position) that failed: same matches, linear time.
+Worst rule now 126 ms at 400 KB, all growing linearly; 0 differences from V8
+over 27,391 matches in 129 MB of real code. Pointing the same matcher at the
+gitleaks rules took a 396 KB one-identifier file from 10.8 s to 133 ms (two
+patterns nest `[\w.-]{0,50}?` inside itself) — and running the existing suite
+over it found a bug in the matcher before it shipped: it cached where the next
+required text sat and reused that cache when the same text was searched again
+from the start, so the **second of two files with identical content got no
+community or gitleaks findings at all**. Proven by a test that fails without
+the fix. The other limits: the RLS model is now one schema per project (a
+whole-repo scan had mixed this repo's two fixtures, inventing a CTS050 on one
+and dropping a CTS014 on the other), and CTS014 is judged per command, so an
+`auth.role() = 'authenticated'` policy OR'd beside an `auth.uid()` one is
+reported; Prisma's `migration_lock.toml` now marks non-Postgres migrations,
+which removed 11 false CTS010 criticals from BizDataly's SQLite app. Auth
+wrappers are judged by what their definition does — iron-session and next-auth
+v5 `auth()` attach a session without requiring one, so they no longer count as
+auth on their own — and unknown package wrappers still credited by name are
+now named in a warning. A guest-only action (`if (session) redirect(...)`) is
+low only while everything it does is what a sign-up does; the two bugs a name
+list once hid, `register` hardcoding an Admin role and `leads` running paid
+enrichment, stay critical and are pinned by tests. **Verified:** 205 → 238
+tests; before/after on 11 real repos differs only by BizDataly's 11 removed
+false criticals, with scan times unchanged.
+
 ## Open
 
 - [ ] **Maintainer-only settings the audit turned up** (not doable from the
       repo): **enable immutable releases** (release.yml publishes via a draft,
       so it is compatible), **delete the dead `NPM_TOKEN` secret**, and add a
       **Cloudflare rate-limit rule** on `/license/*` and `/webhooks/*`.
-- [ ] **Known limits left by the audit, on purpose.** A whole-repo scan builds
-      one SQL schema from every `.sql` file, so separate projects' migrations
-      mix (visible on this repo's own fixtures). CTS014 still counts a table
-      isolated if any one policy uses `auth.uid()`, even when an OR'd
-      `auth.role() = 'authenticated'` policy leaks. ~35 vendored patterns are
-      still super-linear on adversarial input; 64 KB windows plus a per-rule time
-      budget cap them (a budget overrun is `incomplete`), but files ≤400 KB are
-      searched whole. Auth wrappers are credited by name
-      (`withIronSessionApiRoute` counts), and an action that reads the session
-      only to turn signed-in users away (`if (session) redirect('/')`) is now a
-      CTS001.
+- [ ] **Known limits still open after 0.13.13.** SQL inside a `DO $$ … $$`
+      block is not parsed, so policies created there are invisible (a false
+      CTS014 on StorageVisual's `forum_comment_likes`). A gate-only SELECT
+      (`auth.role() = 'authenticated'`) on a table that is really private is not
+      reported unless a scoped SELECT policy sits beside it — deliberate, to
+      stay quiet on member-readable tables. Custom roles (`to
+      supabase_auth_admin using (true)`) still trip the whole-table CTS014.
+      Unknown package auth wrappers are credited by name, with a warning. The
+      per-rule time budget has a ~2× margin on this machine (worst rule 126 ms
+      per 400 KB vs 250 ms), so a slow runner could still see it fire.
 - [ ] **Billing stays dormant (free in beta).** The Worker's webhook, key-id and
       missing-secret bugs were fixed in the audit, and migration
       `0002_license_per_subscription.sql` must be applied remotely
