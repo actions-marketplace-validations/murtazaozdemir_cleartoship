@@ -583,6 +583,44 @@ overlap produced the phantom "+1 finding" from a file edited mid-scan.
 
 ## Open
 
+- [ ] **Four findings reported from the jobcopilot audit, 2026-10-28/29** (an outside app —
+      MV3 Chrome extension + local Node bridge + a Cloudflare Worker — run as
+      `node dist/cli.js --offline bridge extension d1`, 99 files, 2.7s, 47 findings:
+      3 critical, 27 high, 3 medium, 14 low. **All 47 were checked by hand against the source
+      and all 47 are false positives for that app**, which is the context for the first item):
+      - **The XSS family is 19 of the 27 HIGHs, and they are all one correctly-escaped file.**
+        `VG852` (9), `VG012` (8) and `VG121` (2) all land on the same six-file side panel, which
+        has exactly one `escapeHtml` (escaping `& < > " '`) applied to every attacker-reachable
+        value; the remaining interpolations are numbers, literal ternaries, or fragments already
+        escaped when built. This is the **sink-level** limitation already filed above from the
+        SysXray audit, but the proportion is the new information: a 🔴 HOLD verdict in which
+        70% of the high findings are one correct file is a verdict a reader learns to discount,
+        and the documented next step (`--fix-prompt`, "hand the fixes to your AI editor") would
+        point an agent at correct code and invite it to change it. Worth considering whether a
+        sink whose inputs all pass through a single-argument escaper in the same file can be
+        downgraded, or at least counted once per file rather than once per sink.
+      - **`VG020` "wildcard dependency" reads `engines`.** Two findings, both
+        `bridge/package.json:8`, which is `"engines": { "node": ">=20" }` — a runtime constraint,
+        not a dependency range. A `>=` in `engines` is the normal way to write that field, so
+        this will fire on a large share of Node projects. Probably wants scoping to
+        `dependencies` / `devDependencies` / `peerDependencies`.
+      - **`VG010` SQL injection reads a CSS selector.** `extension/adapters/base.js:157` builds a
+        `querySelectorAll('select, textarea, …')` string. The word `select` plus string
+        concatenation is enough to return CRITICAL, and CRITICAL is what sets the HOLD — so a
+        DOM query in a browser extension with no database anywhere in it decides the verdict.
+        The other `VG010` is `d1/worker.js:66`, which interpolates a frozen `COLUMNS` literal and
+        never input; that one is at least a real SQL string.
+      - **`dist/` has to be built before the documented command works.** The published
+        instruction is `node dist/cli.js`, and on a fresh checkout `dist/` does not exist, so the
+        first run fails. `npm run build` first. Either the docs should say so or the CLI should
+        say it when `dist/` is missing.
+
+      Two things that worked well and are worth not losing: scoping by path
+      (`cleartoship bridge extension d1`) cleanly excluded a vendored upstream that the project
+      does not patch — which took 474 findings down to 47 — and the PASS lines that say what was
+      skipped and why (`.gitignore` entries, build dirs) are the reason it was obvious the run
+      had not quietly missed anything.
+
 - [ ] **Three findings reported from the SysXray audit, 2026-10-28** (an outside
       app, run as `node dist/cli.js --offline` over 44 files, 2.8s):
       - **`VG120` SSRF — two false positives on a Cloudflare Worker.**
