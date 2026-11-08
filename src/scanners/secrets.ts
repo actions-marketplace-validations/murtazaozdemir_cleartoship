@@ -54,7 +54,10 @@ const PATTERNS: Pattern[] = [
     note: 'The anon key is designed to be public; it is only as safe as your RLS policies.',
   },
   { id: 'supabase-secret', label: 'Supabase secret key', re: /\bsb_secret_[A-Za-z0-9_-]{16,}/g, severity: 'critical' },
-  { id: 'openai', label: 'OpenAI API key', re: /\bsk-(?:proj-|svcacct-)?[A-Za-z0-9_-]{24,}/g, severity: 'critical' },
+  // `(?!ant-)`: an `sk-ant-…` key is Anthropic's, matched by its own pattern
+  // below — without the exclusion every such key was reported twice on the same
+  // line, once correctly and once as a "Hardcoded OpenAI API key".
+  { id: 'openai', label: 'OpenAI API key', re: /\bsk-(?!ant-)(?:proj-|svcacct-)?[A-Za-z0-9_-]{24,}/g, severity: 'critical' },
   { id: 'anthropic', label: 'Anthropic API key', re: /\bsk-ant-[A-Za-z0-9_-]{24,}/g, severity: 'critical' },
   { id: 'stripe-live', label: 'Stripe live secret key', re: /\b(?:sk|rk)_live_[A-Za-z0-9]{16,}/g, severity: 'critical' },
   { id: 'stripe-test', label: 'Stripe test secret key', re: /\b(?:sk|rk)_test_[A-Za-z0-9]{16,}/g, severity: 'medium' },
@@ -168,7 +171,7 @@ const HEX_DIGEST = /^[a-f0-9]{40}$|^[a-f0-9]{64}$/i;
  * Findings here are reported at `low` so they are visible but never blocking.
  */
 const NON_PRODUCTION_PATH =
-  /(^|\/)(tests?|__tests__|__mocks__|__fixtures__|fixtures?|spec|specs|examples?|docs?|demo|samples?|e2e|cypress|playwright|stories)(\/|$)|\.(test|spec|stories|fixture)\.[a-z]+$|(^|\/)(README|CHANGELOG|CONTRIBUTING)/i;
+  /(^|\/)(tests?|__tests__|__mocks__|__fixtures__|fixtures?|spec|specs|examples?|docs?|demo|samples?|e2e|cypress|playwright|stories|testdata)(\/|$)|\.(test|spec|stories|fixture)\.[a-z]+$|_test\.go$|(^|\/)(test_[^/]*\.py|conftest\.py)$|(^|\/)(README|CHANGELOG|CONTRIBUTING)/i;
 
 /**
  * Env var names that are meant to be public even though they read like secrets.
@@ -402,7 +405,7 @@ export const secretsScanner: Scanner = {
       const isExample = /\.(example|sample|template)$/.test(relPath) || /\.env\.example/.test(relPath);
       const fixtureFile = NON_PRODUCTION_PATH.test(relPath);
       filesScanned++;
-      const suppress = new Suppressions(source);
+      const suppress = new Suppressions(source, relPath);
       const clientComponent = /^\s*(['"])use client\1/m.test(source.slice(0, 400));
       const lines = new LineIndex(source);
       const openers = commentOpenersFor(file);

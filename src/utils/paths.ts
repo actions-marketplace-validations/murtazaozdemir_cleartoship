@@ -22,7 +22,11 @@ export type PathClass = 'production' | 'dev-tooling' | 'non-production';
  * named `spec-parser.ts` is production code that happens to parse specs.
  */
 const NON_PRODUCTION =
-  /(^|\/)(?:(?:[\w.]+[-_])?(?:tests?|specs?|e2e|fixtures?|mocks?)(?:[-_][\w.]+)?|__tests__|__mocks__|__fixtures__|examples?|docs?|demo|samples?|cypress|playwright|stories)\/|\.(test|spec|stories|fixture)\.[a-z]+$/i;
+  // `_test.go` and `testdata/` are Go's own conventions, and `test_*.py` /
+  // `conftest.py` are pytest's: none of them spells "test" the JavaScript way,
+  // so a Go scanner's 187 fixture keys were criticals while the same strings
+  // in a `.test.ts` were low.
+  /(^|\/)(?:(?:[\w.]+[-_])?(?:tests?|specs?|e2e|fixtures?|mocks?)(?:[-_][\w.]+)?|__tests__|__mocks__|__fixtures__|examples?|docs?|demo|samples?|cypress|playwright|stories|testdata)\/|\.(test|spec|stories|fixture)\.[a-z]+$|_test\.go$|(^|\/)(?:test_[^/]*\.py|conftest\.py)$/i;
 
 /**
  * Build and maintenance tooling. It runs on a developer's machine or in CI,

@@ -188,6 +188,7 @@ export function renderJson(scan: FullScan): string {
       gitIgnoredCount: scan.gitIgnoredCount,
       escapingSymlinkCount: scan.escapingSymlinkCount,
       oversizeCount: scan.oversizeCount,
+      generatedCount: scan.generatedCount ?? 0,
       skippedDirs: scan.skippedDirs,
       unreadable: scan.unreadable ?? [],
       durationMs: scan.durationMs,
@@ -242,6 +243,24 @@ export function renderSarif(scan: FullScan, version: string): string {
               rules: [...rules.values()],
             },
           },
+          // The verdict's whole point is that finding nothing and not being
+          // able to look are different results, and SARIF was the one surface
+          // that still conflated them: an incomplete run uploaded to code
+          // scanning as an ordinary successful analysis, showing what was found
+          // and nothing about what was never read. With `allow-incomplete`, or
+          // `fail-on: none`, the job is green as well, so this was the last
+          // place that could have said so. `executionSuccessful` is the field
+          // SARIF has for exactly this.
+          invocations: [
+            {
+              executionSuccessful: (scan.incomplete ?? []).length === 0,
+              toolExecutionNotifications: (scan.incomplete ?? []).map((reason) => ({
+                level: 'warning',
+                message: { text: reason },
+                descriptor: { id: 'cleartoship/incomplete' },
+              })),
+            },
+          ],
           results: scan.findings.map((f) => ({
             ruleId: f.id,
             level: SARIF_LEVEL[f.severity],
@@ -293,7 +312,7 @@ export function renderFixPrompt(scan: FullScan): string {
   lines.push(`Project: ${oneLine(scan.framework)}`);
   lines.push('');
 
-  const bySeverity = ['critical', 'high', 'medium', 'low'] as const;
+  const bySeverity = ['critical', 'high', 'medium', 'low', 'info'] as const;
   for (const sev of bySeverity) {
     const group = scan.findings.filter((f) => f.severity === sev);
     if (!group.length) continue;
@@ -401,7 +420,37 @@ const MD_SEVERITY: Record<Severity, string> = {
  * collapsible block, so a passing PR shows one green line and a failing one puts
  * the blocking issues first without burying the diff.
  */
-export function renderMarkdown(scan: FullScan): string {
+/**
+ * GitHub refuses an issue comment body over 65,536 characters with a 422, and
+ * the Action posts this as a comment. At about 125 characters a row that is
+ * ~535 findings — which the 155-repo corpus reached twice (603 and 732) off
+ * nothing stranger than a large lockfile matched against OSV. The 422 landed in
+ * `|| echo "::warning::Could not post…(does the token have pull-requests:
+ * write?)"`, so the one surface a reviewer actually reads showed nothing, and
+ * said the wrong reason for it. Rows are dropped from the least severe end,
+ * with a line saying how many and where the rest are; the heading, the counts
+ * and the incomplete warning are never dropped.
+ */
+const MARKDOWN_LIMIT = 65_000;
+
+export function renderMarkdown(scan: FullScan, opts: { maxChars?: number } = {}): string {
+  const maxChars = opts.maxChars ?? MARKDOWN_LIMIT;
+  let body = markdownBody(scan, scan.findings.length);
+  if (body.length <= maxChars) return body;
+  // Find the largest number of rows that fits. The body grows monotonically
+  // with the row count, so a bisection lands on the right one.
+  let lo = 0;
+  let hi = scan.findings.length;
+  while (lo < hi) {
+    const mid = Math.floor((lo + hi + 1) / 2);
+    if (markdownBody(scan, mid).length <= maxChars) lo = mid;
+    else hi = mid - 1;
+  }
+  body = markdownBody(scan, lo);
+  return body.length <= maxChars ? body : markdownBody(scan, 0);
+}
+
+function markdownBody(scan: FullScan, shown: number): string {
   const out: string[] = [];
   const total = scan.findings.length;
   const verdict = verdictOf(scan);
@@ -447,9 +496,18 @@ export function renderMarkdown(scan: FullScan): string {
     return out.join('\n');
   }
 
-  const bySeverity = ['critical', 'high', 'medium', 'low'] as const;
-  const blocking = scan.findings.filter((f) => f.severity === 'critical' || f.severity === 'high');
-  const rest = scan.findings.filter((f) => f.severity === 'medium' || f.severity === 'low');
+  // Partitioned, not enumerated: listing the severities by name left `info`
+  // out of both tables, so an info finding — the Supabase anon key, the one
+  // rule that emits one, asked for with `--min-severity info` — was in the
+  // terminal report and the JSON and in neither table here, while the
+  // lower-severity count said one fewer than it had. A renderer may rank a
+  // finding last; it may not drop one it was given.
+  // `scan.findings` is sorted most-severe-first, so taking a prefix drops the
+  // least severe rows and keeps every blocking one for as long as it can.
+  const listed = scan.findings.slice(0, shown);
+  const omitted = total - listed.length;
+  const blocking = listed.filter((f) => f.severity === 'critical' || f.severity === 'high');
+  const rest = listed.filter((f) => f.severity !== 'critical' && f.severity !== 'high');
 
   const table = (findings: Finding[]) => {
     const rows = ['| Severity | Rule | Finding | Location |', '| --- | --- | --- | --- |'];
@@ -488,6 +546,14 @@ export function renderMarkdown(scan: FullScan): string {
     out.push(fenced(termSafe(worst.fix, true)));
     out.push('');
     out.push('</details>');
+    out.push('');
+  }
+
+  if (omitted > 0) {
+    out.push(
+      `> ⚠️ **${omitted} more finding${omitted === 1 ? '' : 's'} not shown here** — this comment is at ` +
+        'GitHub’s size limit. The full list is in the job summary, and in the JSON report.',
+    );
     out.push('');
   }
 

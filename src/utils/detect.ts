@@ -70,7 +70,14 @@ export function detectFramework(root: string, files: string[]): FrameworkInfo {
       hasDep(pkg, 'firebase') ||
       hasDep(pkg, 'firebase-admin') ||
       hasDep(pkg, '@firebase/app') ||
-      exists(join(root, 'firebase.json')),
+      exists(join(root, 'firebase.json')) ||
+      // The security rules themselves. A repository can hold them without the
+      // client SDK in its own package.json (a functions-only or rules-only
+      // repo), and the two rules that read them are skipped as "not a Firebase
+      // project" unless something here says it is one.
+      exists(join(root, 'firestore.rules')) ||
+      exists(join(root, 'storage.rules')) ||
+      files.some((f) => /\/(firestore|storage)\.rules$/.test(f)),
     describe() {
       const parts: string[] = [];
       if (this.nextjs === 'app-router') parts.push('Next.js (App Router)');

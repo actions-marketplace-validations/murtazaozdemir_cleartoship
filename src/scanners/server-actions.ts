@@ -1721,7 +1721,7 @@ export const serverActionsScanner: Scanner = {
     }
 
     function analyseFile(file: string, relPath: string, source: string, ast: any, routeFile: boolean, pagesApi: boolean) {
-      const suppress = new Suppressions(source);
+      const suppress = new Suppressions(source, relPath);
       // The program's own directive prologue. A regex over the first lines used to read
       // an indented inline `'use server'` as the module's, turning every export into an action.
       const programUseServer = hasDirective(ast.program, 'use server');

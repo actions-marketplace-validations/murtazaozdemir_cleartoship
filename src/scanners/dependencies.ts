@@ -81,7 +81,14 @@ function collectFromPyproject(source: string, relPath: string): Declared[] {
   lines.forEach((raw, i) => {
     const line = raw.trim();
     if (/^\[/.test(line)) {
-      inDeps = /\[(tool\.poetry\.(dev-)?dependencies|project\.optional-dependencies)\]/.test(line);
+      // `tool.poetry.group.<name>.dependencies` is where Poetry ≥1.2 puts every
+      // non-default group, and `[dependency-groups]` is PEP 735 — the table uv
+      // writes dev dependencies to. Neither was matched, so a hallucinated or
+      // vulnerable package in either was never looked up at all.
+      inDeps =
+        /\[(tool\.poetry\.(dev-)?dependencies|tool\.poetry\.group\.[\w.-]+\.dependencies|project\.optional-dependencies|dependency-groups)\]/.test(
+          line,
+        );
       inlineArray = false;
       return;
     }
@@ -300,6 +307,19 @@ function collectFromProse(rawSource: string, relPath: string): Declared[] {
   harvest(INSTALL_COMMAND, 'npm', false);
   harvest(PIP_COMMAND, 'pypi', false);
   return out;
+}
+
+/**
+ * `requirements.txt` by any of its conventional names: `requirements-dev.txt`,
+ * `requirements_test.txt`, and the pip-tools layout where a `requirements/`
+ * directory holds `base.txt` / `prod.txt`. Only the exact name was collected
+ * before, so a hallucinated package in `requirements-dev.txt` was never looked
+ * up — the file was read by the walk and then asked nothing.
+ */
+function isRequirementsFile(file: string): boolean {
+  const b = basename(file);
+  if (/^requirements[\w.-]*\.txt$/i.test(b)) return true;
+  return /(^|\/)requirements\/[^/]+\.txt$/i.test(file.split('\\').join('/'));
 }
 
 /** Lifecycle scripts that run automatically on `npm install`. */
@@ -530,8 +550,12 @@ function resolveVersions(root: string, declared: Declared[]): Map<string, string
 
   const pnpmLock = readIfPresent('pnpm-lock.yaml');
   if (pnpmLock) {
-    // Entries look like `/next@14.2.3:` (v6/v9) or `/next/14.2.3:` (v5).
-    const re = /^\s{2}\/?((?:@[^/\s]+\/)?[^/@\s]+)[@/](\d+\.\d+\.\d+[^\s:(]*)/gm;
+    // Entries look like `/next@14.2.3:` (v6/v9) or `/next/14.2.3:` (v5). YAML
+    // quotes a key that starts with `@`, so every scoped entry in a v9 lockfile
+    // is written `'@babel/core@7.24.0':` — the quote has to be stepped over or
+    // no scoped package ever resolves and OSV is asked about the range floor
+    // instead of the version actually installed.
+    const re = /^\s{2}['"]?\/?((?:@[^/\s'"]+\/)?[^/@\s'"]+)[@/](\d+\.\d+\.\d+[^\s:('"]*)/gm;
     let m: RegExpExecArray | null;
     while ((m = re.exec(pnpmLock)) !== null) {
       setNpm(m[1]!, m[2]!);
@@ -589,7 +613,7 @@ export const dependencyScanner: Scanner = {
     return ctx.files.some((f) => {
       const b = basename(f);
       return (
-        b === 'package.json' || b === 'requirements.txt' || b === 'pyproject.toml' || isProse(f)
+        b === 'package.json' || isRequirementsFile(f) || b === 'pyproject.toml' || isProse(f)
       );
     });
   },
@@ -609,11 +633,27 @@ export const dependencyScanner: Scanner = {
       const relPath = rel(ctx.root, file);
       const dir = relPath.includes('/') ? relPath.slice(0, relPath.lastIndexOf('/')) : '';
       if (b === 'package.json') {
+        // A manifest that exists but cannot be parsed was checked by nothing.
+        // Every collector below swallows the parse error and returns nothing,
+        // which used to read as "no dependencies declared" — passed, complete,
+        // with the hallucination, CVE and install-hook checks all silently off.
+        try {
+          JSON.parse(source);
+        } catch (err) {
+          const reason = err instanceof Error ? err.message.split('\n')[0] : String(err);
+          result.incomplete = [
+            ...(result.incomplete ?? []),
+            `${relPath} could not be parsed as JSON (${reason}), so the dependencies and install ` +
+              'scripts it declares were NOT checked — a hallucinated, vulnerable or malicious ' +
+              'package there would not be reported.',
+          ];
+          continue;
+        }
         const own = packageJsonName(source);
         if (own) localPackages.push({ name: own, ecosystem: 'npm', dir, version: packageJsonVersion(source) });
         declared.push(...collectFromPackageJson(source, relPath));
         result.findings.push(...collectInstallScriptFindings(source, relPath));
-      } else if (b === 'requirements.txt') declared.push(...collectFromRequirements(source, relPath));
+      } else if (isRequirementsFile(file)) declared.push(...collectFromRequirements(source, relPath));
       else if (b === 'pyproject.toml') {
         const own = pyprojectName(source);
         if (own) localPackages.push({ name: own, ecosystem: 'pypi', dir, version: null });
@@ -754,9 +794,12 @@ export const dependencyScanner: Scanner = {
           severity: 'critical',
           title: 'Dependency was unpublished and its name is open to takeover',
           detail:
-            `\`${d.name}\` is ${origin} but no longer exists on ${registryName}, yet it still records ` +
-            `${f.weeklyDownloads} weekly downloads. It was published and then withdrawn, so the name is ` +
-            'free for anyone to claim — and whoever claims it inherits every one of those installs.',
+            `\`${d.name}\` is ${origin} but has no versions left on ${registryName}` +
+            (f.weeklyDownloads
+              ? `, yet it still records ${f.weeklyDownloads} weekly downloads`
+              : ' (the registry still answers for the name, with an empty version list)') +
+            '. It was published and then withdrawn, so the name is free for anyone to claim — and ' +
+            'whoever claims it inherits every install that still asks for it.',
           fix:
             `Remove \`${d.name}\` and replace it with a maintained package. Your install is already ` +
             'failing or falling back to a cache; the risk is the day someone republishes the name.',
@@ -1023,6 +1066,9 @@ export const dependencyScanner: Scanner = {
 
 /** Exposed for tests: harvest package names from prose install commands. */
 export const collectProseForTest = collectFromProse;
+
+/** Exposed for tests: resolve installed versions from lockfiles. */
+export const resolveVersionsForTest = resolveVersions;
 
 /** Exposed for tests: harvest package names from a pyproject.toml. */
 export const collectPyprojectForTest = collectFromPyproject;

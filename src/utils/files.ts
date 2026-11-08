@@ -4,7 +4,7 @@ import {
 } from 'node:fs';
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import {
-  Gitignore, extendedAt, repositoryExcludes, readGitIndex, isTracked, readBounded,
+  Gitignore, extendedAt, repositoryExcludes, readGitIndex, isTracked, readBounded, decodeText,
 } from './gitignore.js';
 import type { IndexLookup, TrackedPaths } from './gitignore.js';
 
@@ -28,6 +28,17 @@ const SKIP_DIRS = new Set([
 const SCAN_EXTS = new Set([
   '.ts', '.tsx', '.js', '.jsx', '.mjs', '.cjs', '.mts', '.cts', '.sql',
   '.json', '.txt', '.toml', '.env', '.yaml', '.yml',
+  // A static page is shipped source like any other: a `public/index.html` with
+  // a Supabase service-role key in an inline `<script>` was read by nothing and
+  // counted nowhere, and this project's own landing pages were in the
+  // self-scan's argument list while no HTML file was ever opened.
+  '.html', '.htm',
+  // Single-file components are where a Svelte, Vue or Astro app keeps most of
+  // its code — and none of them was read at all: a `sk_live_` key that was a
+  // critical in the `.ts` file beside them produced nothing in any of the
+  // three. SKIP_DIRS already names `.svelte-kit` and `.nuxt`, so these users
+  // were always expected; their source files were not.
+  '.svelte', '.vue', '.astro',
   // Prose files matter: AI agents copy `npm install <hallucination>` out of
   // READMEs and agent instruction files long before it reaches a manifest.
   '.md', '.mdc', '.mdx',
@@ -37,7 +48,13 @@ const SCAN_EXTS = new Set([
 ]);
 
 /** Extensionless files worth reading. */
-const NAMED_FILES = new Set(['Dockerfile', 'Makefile', 'Procfile']);
+const NAMED_FILES = new Set([
+  'Dockerfile', 'Makefile', 'Procfile',
+  // Firebase security rules: the two vendored rules that read them (VG750,
+  // VG753 — `allow read, write: if true`) could never match, because nothing
+  // read a `.rules` file and `languagesFor` never answered `firestore`.
+  'firestore.rules', 'storage.rules', 'database.rules.json',
+]);
 
 /** Instruction files read by coding agents. No extension, but high signal. */
 const AGENT_FILES = new Set([
@@ -97,6 +114,15 @@ export interface WalkResult {
   oversize: number;
   /** The files counted in `oversize`, absolute paths. */
   oversizeFiles: string[];
+  /**
+   * How many files were left unread for looking generated (`looksGenerated`).
+   * Counted and named for the same reason as `oversize` and `skippedDirs`: the
+   * skip was silent, so a file called `app/actions/admin.gen.ts` — or anything
+   * under `generated/client/` — produced no findings and no line saying why.
+   */
+  generated: number;
+  /** The files counted in `generated`, absolute paths. */
+  generatedFiles: string[];
   /** Names of the build/dependency directories skipped whole, deduplicated. */
   skippedDirs: string[];
   /**
@@ -214,6 +240,8 @@ export function walk(
   // must never be silently indistinguishable from "nothing was wrong".
   let oversize = 0;
   const oversizeFiles: string[] = [];
+  let generated = 0;
+  const generatedFiles: string[] = [];
   const skippedDirs = new Set<string>();
 
   visited.add(rootReal);
@@ -264,7 +292,12 @@ export function walk(
       unreadable.push(full);
       return;
     }
-    if (!looksGenerated(full)) found.push(full);
+    if (looksGenerated(full)) {
+      generated++;
+      generatedFiles.push(full);
+      return;
+    }
+    found.push(full);
   };
 
   // `cleartoship path/to/one/file.ts` names a file, which the CLI documents and
@@ -285,6 +318,8 @@ export function walk(
       escapingSymlinks,
       oversize,
       oversizeFiles,
+      generated,
+      generatedFiles,
       skippedDirs: [],
       unreadable,
       warnings,
@@ -339,6 +374,41 @@ export function walk(
           const ruledOut = frame.ignoredButTracked || rules.ignores(full, true);
           if (ruledOut && !holdsTracked) {
             gitIgnored++;
+            // SCAN_EVEN_IF_IGNORED promises that an ignored `.env` is still
+            // read — but a `.env` whose *parent directory* is the thing the
+            // rules ignore never reached that check, because the walk did not
+            // descend. One shallow listing per skipped directory keeps the
+            // promise for `config/.env` at the cost of a readdir; `.env` files
+            // nested deeper inside an ignored tree are still not seen.
+            let names: string[] = [];
+            try {
+              names = readdirSync(full);
+            } catch {
+              /* unlistable: nothing to peek at */
+            }
+            for (const name of names) {
+              if (!name.startsWith('.env')) continue;
+              const child = join(full, name);
+              if (!SCAN_EVEN_IF_IGNORED.test(child)) continue;
+              let cst;
+              try {
+                cst = statSync(child);
+              } catch {
+                continue;
+              }
+              if (!cst.isFile()) continue;
+              let creal: string;
+              try {
+                creal = realpathSync(child);
+              } catch {
+                continue;
+              }
+              if (!insideRoot(creal)) {
+                escapingSymlinks++;
+                continue;
+              }
+              consider(child, name, cst.size, frame);
+            }
             continue;
           }
           if (ruledOut) ignoredButTracked = true;
@@ -360,6 +430,8 @@ export function walk(
     escapingSymlinks,
     oversize,
     oversizeFiles: oversizeFiles.sort(),
+    generated,
+    generatedFiles: generatedFiles.sort(),
     skippedDirs: [...skippedDirs].sort(),
     unreadable: unreadable.sort(),
     warnings,
@@ -398,7 +470,10 @@ export function safeRead(root: string, relPath: string, maxBytes: number = MAX_F
 
 export function read(file: string): string | null {
   try {
-    return readFileSync(file, 'utf8');
+    // Decoded via the BOM-aware decoder, not `utf8` outright: a UTF-16 file
+    // (PowerShell's default for redirected output) decoded as UTF-8 is
+    // NUL-riddled mojibake that no scanner can match — scanned in name only.
+    return decodeText(readFileSync(file));
   } catch {
     return null;
   }
@@ -450,6 +525,8 @@ export function languagesFor(file: string): string[] {
   const base = file.slice(file.lastIndexOf('/') + 1);
   const ext = base.includes('.') ? base.slice(base.lastIndexOf('.')) : '';
   if (base.startsWith('Dockerfile')) return ['dockerfile'];
+  if (base === 'render.yaml' || base === 'render.yml') return ['yaml', 'render-config'];
+  if (/^docker-compose(\.[\w-]+)?\.ya?ml$/.test(base)) return ['yaml', 'docker-compose'];
   switch (ext) {
     case '.ts':
     case '.tsx':
@@ -462,7 +539,33 @@ export function languagesFor(file: string): string[] {
     case '.cjs':
       return ['javascript'];
     case '.json':
-      return base === 'vercel.json' ? ['json', 'vercel-config'] : ['json'];
+      if (base === 'vercel.json') return ['json', 'vercel-config'];
+      if (base === 'database.rules.json') return ['json', 'firestore'];
+      return ['json'];
+    case '.html':
+    case '.htm':
+      return ['html'];
+    // Single-file components are an HTML-shaped document with script blocks:
+    // the html rules (inline handlers, script-in-markup sinks) are the ones
+    // whose premise holds there. The JS regex rules are not applied — template
+    // syntax (`{#if}`, `v-if`, `{expr}`) is not JavaScript, and a rule firing
+    // on a template expression would be a finding about code that never runs
+    // as written. The AST scanners skip them for the same reason they skip
+    // inline <script> in .html, which the docs record as a known limit.
+    case '.svelte':
+    case '.vue':
+    case '.astro':
+      return ['html'];
+    case '.toml':
+      // The TOML rules (VG517/518/520 — `[env] SECRET=…`, an exposed database
+      // port, `force_https = false`) were vendored, counted as active and could
+      // never run: `.toml` files are read by the walk, and this returned nothing
+      // for them, which makes the community scanner skip the file whole.
+      if (base === 'fly.toml') return ['toml', 'fly-config'];
+      if (base === 'netlify.toml') return ['toml', 'netlify-config'];
+      return ['toml'];
+    case '.rules':
+      return ['firestore'];
     case '.sql':
       return ['sql'];
     case '.yml':

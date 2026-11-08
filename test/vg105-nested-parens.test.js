@@ -6,7 +6,7 @@ import { join, dirname } from 'node:path';
 
 import { scan } from '../dist/index.js';
 
-// Found on a real app (aistoreaudit) while checking that a JWT-hardening fix actually took:
+// Found on a real app (app A) while checking that a JWT-hardening fix actually took:
 // pinning `algorithms: [ALG]` still got flagged, because VG105's "no algorithms option" branch
 // ends on the first `)` after the second argument. When that argument is itself a call —
 // `getJwtSecret()` — the regex backtracks onto ITS closing paren, matches only

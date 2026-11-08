@@ -510,7 +510,7 @@ export const agentLogicScanner: Scanner = {
         const placed = adjustForPath(f.severity, relPath);
         return { ...f, severity: placed.severity, detail: f.detail + placed.note };
       };
-      const suppress = new Suppressions(source);
+      const suppress = new Suppressions(source, relPath);
 
       const push = (f: Omit<Finding, 'file'> & { line: number }) => {
         if (suppress.suppressed(f.line, f.id)) return;

@@ -37,6 +37,8 @@ export interface FullScan {
   escapingSymlinkCount: number;
   /** Files left unread because they exceed the walker's size cap. */
   oversizeCount: number;
+  /** Files left unread because they look machine-generated. */
+  generatedCount: number;
   /** Build and dependency directories skipped whole, by name. */
   skippedDirs: string[];
   /**
@@ -81,6 +83,9 @@ export async function scan(options: ScanOptions): Promise<FullScan> {
   const gitIgnoredCount = walked.reduce((n, w) => n + w.gitIgnored, 0);
   const escapingSymlinkCount = walked.reduce((n, w) => n + w.escapingSymlinks, 0);
   const oversizeCount = walked.reduce((n, w) => n + w.oversize, 0);
+  const generatedFiles = [...new Set(walked.flatMap((w) => w.generatedFiles))]
+    .map((p) => rel(root, p))
+    .sort();
   const skippedDirs = [...new Set(walked.flatMap((w) => w.skippedDirs))].sort();
   const unreadable = [...new Set(walked.flatMap((w) => w.unreadable))].map((p) => rel(root, p)).sort();
   const walkWarnings = [...new Set(walked.flatMap((w) => w.warnings))];
@@ -267,6 +272,24 @@ export async function scan(options: ScanOptions): Promise<FullScan> {
     });
   }
 
+  // Generated files are skipped on purpose — a Prisma client ships its own
+  // credentials and its own `queryRawUnsafe` calls — but the skip was silent,
+  // and silence is indistinguishable from a clean read. `admin.gen.ts` and
+  // `src/generated/client/admin.ts`, byte-identical to a file reported critical
+  // beside them, were left out of a 🟢 report that named neither.
+  if (generatedFiles.length > 0) {
+    checks.push({
+      label: `Generated files skipped (${generatedFiles.length})`,
+      passed: true,
+      note:
+        'machine-generated code (a codegen path or a generated-file banner), which is ' +
+        'regenerated from source rather than written by hand: ' +
+        generatedFiles.slice(0, 5).join(', ') +
+        (generatedFiles.length > 5 ? `, and ${generatedFiles.length - 5} more` : '') +
+        '. Nothing in them was read, so nothing in them was checked.',
+    });
+  }
+
   if (escapingSymlinkCount > 0) {
     checks.push({
       label: `Symlinks leaving the scan root not followed (${escapingSymlinkCount})`,
@@ -287,6 +310,7 @@ export async function scan(options: ScanOptions): Promise<FullScan> {
     gitIgnoredCount,
     escapingSymlinkCount,
     oversizeCount,
+    generatedCount: generatedFiles.length,
     skippedDirs,
     unreadable,
     findings: filtered,

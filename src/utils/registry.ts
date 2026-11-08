@@ -23,9 +23,10 @@ export interface PackageFacts {
    */
   securityHold?: boolean;
   /**
-   * The package is gone from the registry but still has download traffic,
-   * meaning it was published, then unpublished. The name is free for anyone to
-   * take over and inherit those installs.
+   * The package was published and then withdrawn: either a 404 with download
+   * traffic still recorded against it, or — the shape that reads as healthy —
+   * a 200 whose packument has no versions left at all. Either way the name is
+   * free for anyone to take over, and whoever takes it inherits the installs.
    */
   unpublished?: boolean;
   /** Set when the lookup itself failed (offline, rate limited, ...). */
@@ -157,6 +158,29 @@ export class Registry {
     if (typeof doc === 'number') throw new Error(`npm registry returned ${doc}`);
 
     const versions = Object.keys(doc.versions ?? {});
+
+    // A packument with no versions left is an unpublish, not a package. npm
+    // answers **200** for it — the document carries `time.unpublished` and an
+    // empty `versions` — so reading the status instead of the content called the
+    // name a package that exists, and `time.created` then made it a *recent*
+    // one: CTS021, "newly published, barely used". This project's own name is
+    // the example (unpublished 2026-09-03, and its README says so in prose),
+    // which is how the 2026-10-13 audit found it — the scanner reported the
+    // sentence warning people off the name as a barely-used dependency of this
+    // repository. An install of such a name fails, and the name is free for
+    // anyone to claim and inherit those installs, which is CTS027's whole point.
+    if (versions.length === 0) {
+      const downloads = await this.downloadsFor(encoded);
+      return {
+        name,
+        ecosystem: 'npm',
+        exists: false,
+        unpublished: true,
+        weeklyDownloads: downloads,
+        created: typeof doc.time?.created === 'string' ? doc.time.created : undefined,
+      };
+    }
+
     const facts: PackageFacts = { name, ecosystem: 'npm', exists: true, versions };
 
     const downloads = await this.downloadsFor(encoded);

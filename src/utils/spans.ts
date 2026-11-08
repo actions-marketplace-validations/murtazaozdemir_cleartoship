@@ -39,14 +39,19 @@ export interface CommentStyle {
 export function commentStyleFor(languages: readonly string[]): CommentStyle {
   const has = (l: string) => languages.includes(l);
   return {
+    // JSON-with-comments (`tsconfig.json`, `wrangler.jsonc`) and HCL both take
+    // `//` and `/* … */`; `secrets.ts` already compensated for that in its own
+    // comment-opener list, which is how the omission stayed invisible here.
     slashes:
-      has('javascript') || has('typescript') || has('go') || has('php') || has('sql'),
+      has('javascript') || has('typescript') || has('go') || has('php') || has('sql') ||
+      has('json') || has('terraform') || has('firestore'),
     hash:
       has('python') ||
       has('shell') ||
       has('ruby') ||
       has('yaml') ||
       has('terraform') ||
+      has('toml') ||
       has('dockerfile'),
     dashes: has('sql'),
     regex: has('javascript') || has('typescript'),

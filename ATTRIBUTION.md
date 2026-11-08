@@ -43,9 +43,9 @@ the CVE rules, `src/scan.ts`) rather than in the vendored files:
 - **3 rules are manifest-only** (`MANIFEST_ONLY`): they are not run over
   lockfiles, where they matched ordinary transitive package names.
 - **Most rule patterns run on a linear-time matcher, not V8's regex engine.**
-  209 of the 435 active upstream patterns took over 50 ms on 400 KB of hostile
+  209 of the 435 patterns active at the time took over 50 ms on 400 KB of hostile
   input and 125 over 8 s (`eval.*\(` alone: 50 s in one `exec`), so one crafted
-  file in a pull request could stall a scan. 382 of the 435 now run their
+  file in a pull request could stall a scan. 382 of those 435 now run their
   unchanged pattern through a memoizing matcher in `src/scanners/community.ts`
   that returns the same matches, in the same order, as V8 would — verified with
   0 differences over 27,391 matches in 129 MB of real code. 52 stay on V8

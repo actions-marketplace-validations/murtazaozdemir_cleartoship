@@ -33,7 +33,14 @@ export class Suppressions {
   private static readonly MAX_LOOKBACK = 6;
 
   /**
-   * `file` picks the comment syntax (`//`, `#`, `--`); scanners should pass it.
+   * `file` picks the comment syntax (`//`, `#`, `--`), and every scanner passes
+   * it. It used not to: all six call sites constructed this with the source
+   * alone, so the per-language path below was dead outside its own unit tests
+   * and every check ran the fallback — where `//`, `#` and `--` all open a
+   * comment whatever the file is, so the `//` in a bare `curl https://…` URL in
+   * a shell script turned the rest of that line into a "comment" a directive
+   * could sit in.
+   *
    * Without it, a directive must be in a comment under some syntax AND not in a
    * string literal under JavaScript's — so neither `i--; "cts-ignore"` nor
    * `this.#x = "cts-ignore"` can pass a string off as a comment.

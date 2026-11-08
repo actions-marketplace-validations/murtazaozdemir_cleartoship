@@ -6,7 +6,7 @@ description: How to ship ClearToShip and verify that it actually shipped — rel
 # Shipping ClearToShip
 
 The governing idea, and the reason for everything below: **a green step is not a
-shipped artifact.** Every outage this project and its sibling `aistoreaudit`
+shipped artifact.** Every outage this project and its sibling `app A`
 have had looked like success from inside CI. Nothing here is theoretical — each
 rule is followed by the incident that produced it.
 
@@ -24,7 +24,7 @@ that was supposed to change. Not the exit code, not the checkmark — the artifa
 
 If you cannot state which command you ran to confirm it, it is not confirmed.
 
-This table is for ClearToShip only. The sibling app `aistoreaudit` has the same
+This table is for ClearToShip only. The sibling app `app A` has the same
 rule and its own commands, and `/Users/Shared/CLAUDE.md` is where those live —
 read them there rather than copying them here. One operational fact in two
 places is how the stale one survives, which is the same failure this repo keeps
@@ -32,7 +32,7 @@ fixing in its own docs.
 
 **Why.** On 2026-09-03 the `v0.13.4` release run reached `Check the npm token`,
 failed 401, and skipped publish, registry-verify and the GitHub Release. The job
-was red, but the more dangerous shape is the quiet one: `aistoreaudit` twice ran
+was red, but the more dangerous shape is the quiet one: `app A` twice ran
 stale code in production for days — once because GitHub billing killed runs in
 ~2 seconds *before the job started*, swallowing two releases whole, and once
 because a missing `CLOUDFLARE_API_TOKEN` failed in ~8 seconds while four commits

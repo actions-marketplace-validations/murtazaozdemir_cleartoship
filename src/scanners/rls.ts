@@ -6,6 +6,7 @@ import {
 // Not re-exported through internal.ts; sql.ts has no imports of its own, so
 // reaching it directly cannot introduce an initialisation-order cycle.
 import { readBalanced } from '../utils/sql.js';
+import { adjustForPath } from '../utils/paths.js';
 import type { Finding, ProjectContext, ScanResult, Scanner, Severity } from '../internal.js';
 import { existsSync } from 'node:fs';
 import { basename, dirname, join, relative, resolve, isAbsolute } from 'node:path';
@@ -260,6 +261,36 @@ interface Policy {
   line: number;
 }
 
+/**
+ * A policy predicate reduced to the form two policies can be compared in:
+ * lower-cased, whitespace collapsed, and any number of redundant outer
+ * parentheses removed. `null` (no clause) and an empty clause are the same
+ * thing here.
+ */
+function normalisePredicate(text: string | null): string {
+  let out = (text ?? '').toLowerCase().replace(/\s+/g, ' ').trim();
+  for (;;) {
+    if (!out.startsWith('(') || !out.endsWith(')')) break;
+    // Only when that first `(` is the one the last `)` closes: `(a) and (b)`
+    // must keep both.
+    let depth = 0;
+    let wraps = true;
+    for (let i = 0; i < out.length; i++) {
+      if (out[i] === '(') depth++;
+      else if (out[i] === ')') {
+        depth--;
+        if (depth === 0 && i < out.length - 1) {
+          wraps = false;
+          break;
+        }
+      }
+    }
+    if (!wraps) break;
+    out = out.slice(1, -1).trim();
+  }
+  return out;
+}
+
 interface Table {
   name: string;
   columns: string[];
@@ -508,6 +539,20 @@ export const rlsScanner: Scanner = {
       if (sup && f.line && sup.suppressed(f.line, f.id)) continue;
       const src = f.file ? sources.get(f.file) : undefined;
       if (src && f.line) f.snippet = snippetAt(src, f.line);
+      // Placed like every other scanner's findings (community, logic, agent
+      // all do this; RLS never did): a lint fixture named
+      // `test/sql/0013_rls_disabled_in_public.sql` holds SQL that is *about*
+      // the defect, deliberately, and was reported as eighteen criticals —
+      // a HOLD on a repository whose test data is doing its job. Migrations
+      // are untouched: `migrations/` is deliberately absent from the path
+      // classes, because migrations are the production schema.
+      if (f.file) {
+        const placed = adjustForPath(f.severity, f.file);
+        if (placed.severity !== f.severity) {
+          f.severity = placed.severity;
+          f.detail += placed.note;
+        }
+      }
       result.findings.push(f);
     }
 
@@ -553,7 +598,7 @@ function analyseProject(
       if (source === null) continue;
       const relPath = rel(ctx.root, file);
       sources.set(relPath, source);
-      suppressors.set(relPath, new Suppressions(source));
+      suppressors.set(relPath, new Suppressions(source, relPath));
 
       for (const stmt of splitStatements(source)) {
         const text = stmt.text;
@@ -994,19 +1039,46 @@ function analyseProject(
         const permissive = p.permissive && (isAlwaysTrue(p.using) || isAlwaysTrue(p.withCheck));
 
         if (permissive && isWrite) {
+          // INSERT is not UPDATE. A `WITH CHECK (true)` INSERT policy cannot
+          // touch a row that already exists — PostgreSQL needs an UPDATE or
+          // DELETE policy for that — so saying it lets anyone "overwrite or
+          // delete every other user's rows" described a different policy than
+          // the one it was reporting. What an always-true INSERT does allow is
+          // rows the caller should not be able to write, and on a table with an
+          // ownership column, rows attributed to somebody else. Append-only
+          // tables (an event log, a waitlist, feedback) are the common correct
+          // shape of exactly this policy, which is why the destructive wording
+          // mattered: it read as critical on a table with nothing to destroy.
+          const appendOnly = p.command === 'INSERT';
+          const forgeable = appendOnly && ownerColumn !== undefined;
           findings.push({
             id: 'CTS012',
-            severity: 'critical',
-            title: 'Policy allows unrestricted writes',
+            severity: !appendOnly || anonFacing || forgeable ? 'critical' : 'high',
+            title: appendOnly ? 'Policy allows unrestricted inserts' : 'Policy allows unrestricted writes',
             detail:
               `Policy \`${p.name}\` on \`${p.table}\` grants \`${p.command}\` to ` +
               `${p.roles.join(', ')} with an always-true predicate. ` +
-              (anonFacing
-                ? 'Anyone with the public anon key can insert, overwrite or delete arbitrary rows.'
-                : 'Any signed-up user can overwrite or delete every other user’s rows.'),
+              (appendOnly
+                ? (anonFacing
+                    ? 'Anyone with the public anon key can insert arbitrary rows — unauthenticated, ' +
+                      'unlimited and at any rate they like. '
+                    : 'Any signed-up user can insert arbitrary rows. ') +
+                  (forgeable
+                    ? `The table has an ownership column (\`${ownerColumn}\`), so they can also set it to ` +
+                      'another user’s id and write rows that read as somebody else’s.'
+                    : 'Nothing here can overwrite or delete an existing row — an INSERT policy cannot — so ' +
+                      'if this table is append-only by design, this is the policy for it.')
+                : anonFacing
+                  ? 'Anyone with the public anon key can overwrite or delete arbitrary rows.'
+                  : 'Any signed-up user can overwrite or delete every other user’s rows.'),
             fix:
-              'Replace `USING (true)` / `WITH CHECK (true)` with a predicate that ties the row to the ' +
-              'caller, e.g. `user_id = (SELECT auth.uid())`.',
+              appendOnly
+                ? 'Tie the inserted row to the caller — `WITH CHECK (' +
+                  `${ownerColumn ?? 'user_id'} = (SELECT auth.uid()))` +
+                  '` — or, if the table really is append-only for any signed-in caller, leave it and ' +
+                  'rate-limit the route that writes to it.'
+                : 'Replace `USING (true)` / `WITH CHECK (true)` with a predicate that ties the row to the ' +
+                  'caller, e.g. `user_id = (SELECT auth.uid())`.',
             file: p.file,
             line: p.line,
             cwe: 'CWE-863: Incorrect Authorization',
@@ -1058,6 +1130,10 @@ function analyseProject(
 
     // Permissive policies are OR-ed together, so a second broad policy silently
     // widens whatever the first one narrowed (splinter 0006).
+    //
+    // Compared as text, with whitespace, case and outer parentheses taken out:
+    // an equal predicate is the only case this can prove, and proving more than
+    // that would be a SQL evaluator rather than a scanner.
     const overlap = new Map<string, Policy[]>();
     for (const p of policies) {
       if (!p.permissive) continue;
@@ -1084,6 +1160,30 @@ function analyseProject(
         names.some((n) => gateLeaks.has(`${table}|${cmd}|${n}`)) &&
         names.every((n) => gateLeaks.has(`${table}|${cmd}|${n}`) || defeated.has(`${table}|${cmd}|${n}`))
       ) continue;
+      // Two policies whose predicates are the same text cannot widen each
+      // other: the OR of a predicate with itself is that predicate. The
+      // canonical Supabase shape — a `FOR ALL` owner policy with a `FOR SELECT`
+      // owner policy beside it, both `owner_id = auth.uid()` — was reported as
+      // "a carefully scoped policy is defeated by a broad one", naming the two
+      // identical ones. Redundant, yes; a widening, no, and this rule is only
+      // worth reading when it is about access.
+      const predicates = new Set(
+        group.map((p) => {
+          // Only the clauses PostgreSQL applies to this command: SELECT and
+          // DELETE read USING, INSERT reads WITH CHECK, UPDATE reads both. A
+          // `FOR ALL` policy carries a WITH CHECK that a `FOR SELECT` one
+          // cannot, and comparing it under SELECT made two identical SELECT
+          // predicates look different.
+          const parts =
+            cmd === 'INSERT'
+              ? [p.withCheck]
+              : cmd === 'UPDATE'
+                ? [p.using, p.withCheck]
+                : [p.using];
+          return parts.map((t) => normalisePredicate(t)).join(' && ');
+        }),
+      );
+      if (predicates.size === 1) continue;
       const dedupe = `${table}|${cmd}|${role}|${names.join(',')}`;
       if (alreadyReported.has(dedupe)) continue;
       alreadyReported.add(dedupe);

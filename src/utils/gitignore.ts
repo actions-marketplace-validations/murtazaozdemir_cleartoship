@@ -435,7 +435,33 @@ export function containedReader(
  */
 export function readBounded(path: string, maxBytes: number, insideReal?: string): string | null {
   const buf = readBoundedBytes(path, maxBytes, insideReal);
-  return buf === null ? null : buf.toString('utf8');
+  return buf === null ? null : decodeText(buf);
+}
+
+/**
+ * Bytes to text, honouring a byte-order mark. Everything here used to be
+ * `toString('utf8')`, which turns a UTF-16 file into NUL-riddled mojibake that
+ * no pattern can match — and the file still counted as scanned, so a `.env`
+ * written by PowerShell (whose `>` redirect writes UTF-16LE) had its secrets
+ * read by nothing and the run said nothing. A UTF-8 BOM was just as quiet one
+ * layer up: `JSON.parse` throws on it, and a BOM'd `package.json` switched off
+ * every dependency check while reporting "no dependencies declared".
+ */
+export function decodeText(buf: Buffer): string {
+  if (buf.length >= 2 && buf[0] === 0xff && buf[1] === 0xfe) {
+    return buf.toString('utf16le', 2);
+  }
+  if (buf.length >= 2 && buf[0] === 0xfe && buf[1] === 0xff) {
+    // Node has no utf16be decoder; swap pairs into a copy and read it as LE.
+    const even = buf.length - 2 - ((buf.length - 2) % 2);
+    const swapped = Buffer.from(buf.subarray(2, 2 + even));
+    swapped.swap16();
+    return swapped.toString('utf16le');
+  }
+  if (buf.length >= 3 && buf[0] === 0xef && buf[1] === 0xbb && buf[2] === 0xbf) {
+    return buf.toString('utf8', 3);
+  }
+  return buf.toString('utf8');
 }
 
 export function readBoundedBytes(path: string, maxBytes: number, insideReal?: string): Buffer | null {

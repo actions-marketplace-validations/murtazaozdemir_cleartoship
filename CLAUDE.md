@@ -1,5 +1,26 @@
 # CLAUDE.md — cleartoship
 
+## This repo is PUBLIC — anonymise at write time
+
+Calibration notes, audit entries, test comments and TODO items here describe real
+apps that are **private**. A bug report needs the *shape* of the problem, not whose
+repo it came from, so write the label and never the name: `app C's query builder`,
+not the app's actual name. The same goes for file paths inside those apps — a path
+to a security-scan report is worth more to someone hostile than the finding is.
+
+`.feedback-key.md` maps the labels to the real apps and is **gitignored**; it must
+stay that way. `guardvibe` is not one of them — it is the vendored upstream library
+in `src/vendor/guardvibe/`, public by its own licence.
+
+This is written as a rule because the opposite happened: 59 mentions of seven
+private app names, across `TODO.md`, two test files, a shipped source comment, a
+workflow and a release skill, sat on the public `main` for eleven days (2026-10-28
+to 2026-11-08). They were cleaned forward rather than by rewriting history —
+force-pushing would have changed every SHA on a repo that ships a GitHub Action
+with 14 release tags, and it would not even have removed the old commits from
+GitHub, which stay reachable by SHA until Support garbage-collects them. Cheaper
+not to write the name in the first place.
+
 ## Recording progress
 
 When real progress happens here — a fix shipped, a release cut, a calibration
