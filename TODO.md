@@ -583,6 +583,43 @@ overlap produced the phantom "+1 finding" from a file edited mid-scan.
 
 ## Open
 
+- **Two critical rules, 147 findings, 0 true positives — the pattern, not just the rules.**
+  Reported 2026-11-08 by the same caller running the scanner over 42 projects. `VG010` (113,
+  reported below) and `VG001` "Hardcoded credentials" (34) were both worked through finding by
+  finding. Nothing in either was real. The two failures have the same shape, which is why this
+  is one entry rather than two:
+
+  **The rule matches the name of a thing, not the thing.** `VG001`'s clearest case is a map of
+  credential *form fields* to DOM selectors — `sesAccessKey: '<a CSS selector>'` — in a file whose
+  next line is the same strings as a selector list, and with no `AKIA`/`ASIA` anywhere in it. Also
+  `api_key_name`, which holds the *name of which key to use*. `VG010` does the same thing with SQL,
+  matching a `querySelectorAll('select, option, …')` argument.
+
+  **Test fixtures are 26 of the 34.** A test that logs in needs a password in it; that is not an
+  exposure. The sharpest example is in *this repo*: `test/audit-oct21.test.js:252` holds a fixture
+  containing a fake `apiKey` so the scanner can be tested for detecting one — and it reports its
+  own bait as a critical finding against itself.
+
+  **The one change with the most leverage: know what a test path is.** `test/`, `tests/`,
+  `__tests__/`, `*.test.*`, `test_*.py`, `*-test.*`. Not silence — a hardcoded credential in a
+  test is worth `low`, or an `info` line saying how many were suppressed, because a real key does
+  sometimes get pasted into a test. But `critical` is wrong, and at 26 of 34 it is most of the
+  class. The same filter would help every rule of this family, not only `VG001`.
+
+  **Second: require the match to be a value, not an identifier.** If the matched string is a
+  variable or property *name* (`sesAccessKey`, `api_key_name`, `smtpHost`), the finding is about
+  naming, not about a secret. Checking the right-hand side has a credential's shape — length,
+  charset, a known prefix such as `AKIA`, `sk-`, `ghp_`, `eyJ` — would drop the rest of this class.
+
+  For the record, the four findings that were *not* dismissed were accepted rather than denied:
+  local demo-seed and screenshot-capture scripts that really do hardcode a dev password, waived on
+  the condition that they stay local. So the rule's instinct is sound; its precision is not.
+
+  The caveat from the entry below still applies: this is one portfolio, and a rule tuned for zero
+  false negatives will reasonably accept false positives. The number worth weighing is that across
+  147 consecutive critical findings a reviewer learned to skip the severity entirely.
+
+
 - [ ] **Four findings reported from the jobcopilot audit, 2026-10-28/29** (an outside app —
       MV3 Chrome extension + local Node bridge + a Cloudflare Worker — run as
       `node dist/cli.js --offline bridge extension d1`, 99 files, 2.7s, 47 findings:
