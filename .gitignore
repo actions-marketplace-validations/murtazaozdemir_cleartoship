@@ -34,3 +34,6 @@ site/public/SHA256SUMS
 
 # Claude Code agent worktrees (local only)
 .claude/worktrees/
+
+# The key to the anonymised app labels in this repo's notes — never commit (this repo is public)
+.feedback-key.md

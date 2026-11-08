@@ -97,7 +97,7 @@ least 73abec9 — the probe that decides `online` sat below other tests in the
 file and starved on the event loop before its own timeout fired.
 
 **0.13.10 is the first release found by dogfooding a sibling project.**
-Scanning `aistoreaudit` (live on the Shopify App Store) with the newly
+Scanning `app A` (live on the Shopify App Store) with the newly
 calibrated tool, then verifying its maintainer's fixes actually landed,
 turned up two more scanner bugs that the 155-repo corpus never surfaced: a
 `cleartoship-ignore` comment that silently didn't apply because a real
@@ -154,7 +154,7 @@ reads `site/public/*.html` too. **Verification:** 101 → 205 tests, every new o
 failing before its fix; each audit PoC re-run against the merged build; the
 Server Actions changes run before/after on ten real Next.js repos here, which
 caught and fixed two CTS004 false positives the first version introduced in
-aistoreaudit. Self-scan down to five lows; the self-scan also found the last
+app A. Self-scan down to five lows; the self-scan also found the last
 bug of the pass — the comment lexer did not know regex literals, so a backtick
 in `/`\s*,/` opened a phantom template string in `community.ts` and VG105
 fired on a sentence a hundred lines later.
@@ -198,7 +198,7 @@ whole-repo scan had mixed this repo's two fixtures, inventing a CTS050 on one
 and dropping a CTS014 on the other), and CTS014 is judged per command, so an
 `auth.role() = 'authenticated'` policy OR'd beside an `auth.uid()` one is
 reported; Prisma's `migration_lock.toml` now marks non-Postgres migrations,
-which removed 11 false CTS010 criticals from BizDataly's SQLite app. Auth
+which removed 11 false CTS010 criticals from app C's SQLite app. Auth
 wrappers are judged by what their definition does — iron-session and next-auth
 v5 `auth()` attach a session without requiring one, so they no longer count as
 auth on their own — and unknown package wrappers still credited by name are
@@ -206,7 +206,7 @@ now named in a warning. A guest-only action (`if (session) redirect(...)`) is
 low only while everything it does is what a sign-up does; the two bugs a name
 list once hid, `register` hardcoding an Admin role and `leads` running paid
 enrichment, stay critical and are pinned by tests. **Verified:** 205 → 238
-tests; before/after on 11 real repos differs only by BizDataly's 11 removed
+tests; before/after on 11 real repos differs only by app C's 11 removed
 false criticals, with scan times unchanged.
 
 **The 2026-10-13 full audit: eleven defects, and the worst class was again a
@@ -261,7 +261,7 @@ an UPDATE or DELETE policy for that. It is split per command now: critical when
 anon-facing, or when an ownership column means the caller can attribute the row
 to somebody else, and high for an append-only table with no such column, which
 is the common correct shape of exactly that policy. CTS050 reported a widening
-between two policies whose predicates are the same text — StorageVisual's
+between two policies whose predicates are the same text — app F's
 `uploads_own_prefix_insert` and `uploads_user_folder_insert`, identical `with
 check`, one superseding the other across migrations — when the OR of a predicate
 with itself is that predicate; it was also comparing clauses PostgreSQL does not
@@ -298,10 +298,10 @@ by this repository itself, so not looked up" — verified again with a cold cach
 **Verification:** 238 → 252 tests; 12 of the 14 new ones fail against the
 pre-fix build, and the other two are the true positives each fix had to keep
 (VG1008 on an ungated `update({ is_admin: true })`, VG154 on the credits
-race). Before/after over eleven real repositories (aistoreaudit,
-BizDataly, Cherrly, AppVitrine, StorageVisual, datavot, SysXray, guardvibe,
+race). Before/after over eleven real repositories (app A,
+app C, app D, app B, app F, app E, app G, guardvibe,
 splinter, dep-hallucinator, gitleaks): −17 VG012, −13 VG999, −1 VG1008, −1
-CTS050, +6 VG012 on SysXray's HTML dashboards, which are newly read and really
+CTS050, +6 VG012 on app G's HTML dashboards, which are newly read and really
 do write `innerHTML=cpuTopHtml` built by concatenating scan data. **Every
 removal was verified by reading the code it fired on**, and 2,291 → 2,313 files
 scanned with the times unchanged. That sweep ran `--offline`, so the registry
@@ -392,7 +392,7 @@ which stays), −28 VG010, −13 VG001, −10 VG062, −4 VG154, −4 VG060, wit
 CTS030 and 18 splinter RLS findings demoted to low on test paths. splinter
 went HOLD → CLEAR, dep-hallucinator HOLD → CONDITIONAL; what stays is real or
 honestly undecidable — gitleaks' `cmd/generate` keys are realistic by
-construction, and BizDataly's one remaining VG010 interpolates variables whose
+construction, and app C's one remaining VG010 interpolates variables whose
 QBQL markers the match cannot see, the bare-identifier line again. Self-scan
 🟢 on the same five lows, 68 files. Not released: the work sits on
 `audit-2026-10-21`, stacked on the unreleased `audit-2026-10-13`; one 0.13.14
@@ -411,7 +411,7 @@ whole pass teaching VG012 the difference between an HTML sink and a `<style>`
 element's CSS text, an all-literal expression and a value already through an
 escaper. VG408 carried no guard, so it reported all of it again under a
 different id: **eight `<style dangerouslySetInnerHTML={{ __html: css }} />` on
-BizDataly and shadcn's own `chart.tsx` on AppVitrine — the exact findings that
+app C and shadcn's own `chart.tsx` on app B — the exact findings that
 audit cleared** — plus three `sanitizeJsonLd(…)` calls and three lines where it
 only repeated what VG012 had already said. Fourteen findings, not one of them a
 true positive VG012 does not already report. A guard beside an unguarded copy
@@ -426,7 +426,7 @@ That made `export default { fetch(request, env, ctx) { … } }` — the Cloudfla
 Workers entry point, the most common shape there is — a high-severity SSRF
 finding on a *method definition*, and the delegation one line below it too; a
 three-argument `fetch` is never WHATWG `fetch`, which takes two. It reported
-datavot's `fetchNoOpenRedirect`, which calls `assertFetchableImageUrl`, sets
+app E's `fetchNoOpenRedirect`, which calls `assertFetchableImageUrl`, sets
 `redirect: 'manual'`, bounds the chain at three hops and re-validates every
 `Location` — code that implements what the rule's own `fix` text asks for. And
 it reported a URL built on an origin no caller can move: the pattern already
@@ -478,11 +478,11 @@ incomplete warning always.
 three** — worth recording, because each was an over-credit, the direction that
 hides real findings rather than adding noise. The Workers-handler check asked
 whether a `) {` followed within 120 characters, which an ordinary
-`if (!response.ok) {` on the next line satisfies — that cleared an AppVitrine
+`if (!response.ok) {` on the next line satisfies — that cleared an app B
 edge function's `fetch(imageUrl)` on a value straight out of `searchParams`.
 The arity check counted arguments with `[^(),]{1,40},` twice, and a character
 class does not stop at an object literal, so `fetch(url, { ...opts, signal })`
-read as three arguments — SysXray's `fetchTimeout`, on a bare parameter. Both
+read as three arguments — app G's `fetchTimeout`, on a bare parameter. Both
 are read off the matching close paren now. And the forward lookup for a
 module-level const declared below its use was unanchored, so a `const url =
 new URL(request.url)` in a later function vouched for an earlier function's
@@ -494,13 +494,13 @@ four are pinned by keep-case tests.
 **Verification:** 274 → 299 tests; **15 of the 25 new ones fail against the
 pre-fix build, and all 10 that pass are keep-cases** — the true positives each
 fix had to preserve, three of them pinning the over-credits above. Before/after
-over seven real repositories (BizDataly, StorageVisual, datavot, aistoreaudit,
-Cherrly, AppVitrine, SysXray), 1,638 files, run back-to-back on the same
+over seven real repositories (app C, app F, app E, app A,
+app D, app B, app G), 1,638 files, run back-to-back on the same
 checkouts: **452 → 385 findings, criticals 9 → 9, highs 194 → 148, zero
 findings added**, scan times unchanged (−31 VG120, −15 VG408, −8 VG1006,
 −7 VG1021, −6 VG964). **Every removal was read**, and what stays is real or
-honestly undecidable: BizDataly's `downloadAndParseJSONL(url)` and datavot's
-LinkedIn `uploadUrl` take a URL from an external API's response, StorageVisual's
+honestly undecidable: app C's `downloadAndParseJSONL(url)` and app E's
+LinkedIn `uploadUrl` take a URL from an external API's response, app F's
 bridge follows a `Location` header to an arbitrary host and writes the result
 into its own install directory, and the database-row host stays critical to the
 rule's purpose. No verdict changed on any repo — these were noise, not
@@ -513,7 +513,7 @@ patterns through a linear matcher is the thing 0.13.13 exists for. The
 identifiers this audit interpolates into dynamically built patterns are also
 re-checked against `^[A-Za-z_$][\w$]*$` at the point of use rather than trusting
 every caller. One live-corpus lesson: a first before/after showed "+1 finding"
-that turned out to be `datavot/scripts/invariants-test.mjs` being **edited by
+that turned out to be `app E's invariants test` being **edited by
 another session while the scan ran** (mtime four minutes old, a VG153 line
 moving 5434 → 5443 → 5540), which is why the final sweep was run with both
 builds back-to-back. Not released: the work sits on top of `audit-2026-10-21`,
@@ -593,7 +593,7 @@ overlap produced the phantom "+1 finding" from a file edited mid-scan.
         has exactly one `escapeHtml` (escaping `& < > " '`) applied to every attacker-reachable
         value; the remaining interpolations are numbers, literal ternaries, or fragments already
         escaped when built. This is the **sink-level** limitation already filed above from the
-        SysXray audit, but the proportion is the new information: a 🔴 HOLD verdict in which
+        app G audit, but the proportion is the new information: a 🔴 HOLD verdict in which
         70% of the high findings are one correct file is a verdict a reader learns to discount,
         and the documented next step (`--fix-prompt`, "hand the fixes to your AI editor") would
         point an agent at correct code and invite it to change it. Worth considering whether a
@@ -621,7 +621,7 @@ overlap produced the phantom "+1 finding" from a file edited mid-scan.
       skipped and why (`.gitignore` entries, build dirs) are the reason it was obvious the run
       had not quietly missed anything.
 
-- [ ] **Three findings reported from the SysXray audit, 2026-10-28** (an outside
+- [ ] **Three findings reported from the app G audit, 2026-10-28** (an outside
       app, run as `node dist/cli.js --offline` over 44 files, 2.8s):
       - **`VG120` SSRF — two false positives on a Cloudflare Worker.**
         `src/worker.js:10` is a generic `fetchTimeout(url, opts)` helper whose
@@ -672,7 +672,7 @@ overlap produced the phantom "+1 finding" from a file edited mid-scan.
       script blocks not AST-analysed.
 - [ ] **Known limits still open after 0.13.13.** SQL inside a `DO $$ … $$`
       block is not parsed, so policies created there are invisible (a false
-      CTS014 on StorageVisual's `forum_comment_likes`). A gate-only SELECT
+      CTS014 on app F's `forum_comment_likes`). A gate-only SELECT
       (`auth.role() = 'authenticated'`) on a table that is really private is not
       reported unless a scoped SELECT policy sits beside it — deliberate, to
       stay quiet on member-readable tables. Custom roles (`to
@@ -737,7 +737,7 @@ overlap produced the phantom "+1 finding" from a file edited mid-scan.
       `server-actions.ts` / `auth-helpers.ts` pair, the site Worker, or
       `action.yml` and the workflows — all last audited 2026-10-13 or
       2026-09-23 — and it triaged highs only where a critical led there, so
-      the ~180 corpus highs (BizDataly 59, StorageVisual 45, datavot 39) have
+      the ~180 corpus highs (app C 59, app F 45, app E 39) have
       never had the read-the-code pass the criticals got. The next audit
       should start from one of those rather than re-walking this one's ground.
       **Done 2026-10-28** — see the entry above: the renderers and the ~180
@@ -791,7 +791,7 @@ overlap produced the phantom "+1 finding" from a file edited mid-scan.
       half-built at the end of a pass.
       **VG926's name does not match what it matches.** "Next.js / React Server
       Components DoS" fires on `"react": "^19.2.4"` with no requirement that
-      the project has Next.js or RSC at all — StorageVisual is a Vite SPA with
+      the project has Next.js or RSC at all — app F is a Vite SPA with
       no `next` dependency and no Server Functions, and got 5 highs, 3 of them
       on `package-lock.json` and 2 on the `package.json` beside it, so the
       same dependency is reported twice. The version range is correct and
@@ -805,8 +805,8 @@ overlap produced the phantom "+1 finding" from a file edited mid-scan.
       and `renderTerminal` still decides it again** from `scan.counts` inline.
       The two agree today, checked case by case; it is one idea in two places,
       which is how `NON_PRODUCTION` drifted.
-- [ ] **Six new VG012 findings on SysXray, nothing written down yet.** The
-      sweep read SysXray's HTML dashboards for the first time and they really
+- [ ] **Six new VG012 findings on app G, nothing written down yet.** The
+      sweep read app G's HTML dashboards for the first time and they really
       do assign `innerHTML` from strings concatenated out of scan data
       (`innerHTML=cpuTopHtml`). Per the convention, new findings on one of my
       own apps belong in `security-scans/<date>-<time>.md` in *that* repo, not
@@ -825,17 +825,17 @@ overlap produced the phantom "+1 finding" from a file edited mid-scan.
       the age check at the write; every third-party action is SHA-pinned, there
       is no `pull_request_target`, and `release.yml` is default-deny with
       per-job grants. Also untouched: the **~150 remaining highs** after this
-      pass (BizDataly 42, StorageVisual 38, datavot 30) — this audit read every
+      pass (app C 42, app F 38, app E 30) — this audit read every
       *cluster* of three or more and the singletons are unexamined — and the
       **mediums have never been triaged at all** on any repo.
-- [x] **BizDataly's hardcoded Shopify token is written up.** Reported at
-      `/Users/Shared/BizDataly/security-scans/2026-10-28-1841.md` per the
+- [x] **app C's hardcoded Shopify token is written up.** Reported at
+      `/Users/Shared/app C's security-scan report` per the
       convention: a live `shpat_…` Admin API token for a development store,
       hardcoded as a `process.env.X || "shpat_…"` fallback in two server
       modules and a bare `const` in three scripts, duplicated across the
       `Shopify/ShopifyApp/` copy (10 source locations), plus two
       `.claude/settings.local.json` permission entries that embed it in an
-      allowlisted `curl`. Not in any git history today — the BizDataly root is
+      allowlisted `curl`. Not in any git history today — the app C root is
       not a repo and `saas/.env.local` is correctly ignored — which is exactly
       why it is worth fixing before either folder becomes one.
 

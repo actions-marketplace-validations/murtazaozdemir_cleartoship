@@ -90,7 +90,7 @@ const SUPERSEDED = new Map<string, string>([
   // element's CSS text, an all-literal expression, and a value already through
   // an escaper. VG408 carries no guard, so it reported all of it again under a
   // different id: eight `<style dangerouslySetInnerHTML={{ __html: css }} />`
-  // on BizDataly — the very shape that audit cleared — plus three
+  // on app C — the very shape that audit cleared — plus three
   // `sanitizeJsonLd(...)` / `sanitizeThemeInit(...)` calls, and three lines
   // where it simply said what VG012 had already said. Fourteen findings, not
   // one of them a true positive VG012 does not already report. A guarded rule
@@ -857,7 +857,7 @@ const MATCH_GUARDS: Record<
   //    assignments back; a bare identifier whose origin cannot be established
   //    stays reported, the line VG012 draws.
   // 3. A URL that went through an SSRF validator is the fix, not the bug.
-  //    datavot's `fetchNoOpenRedirect` calls `assertFetchableImageUrl(startUrl)`,
+  //    app E's `fetchNoOpenRedirect` calls `assertFetchableImageUrl(startUrl)`,
   //    sets `redirect: 'manual'`, bounds the chain at three hops and
   //    re-validates every `Location` — it implements what this rule's own
   //    `fix` text asks for, and was reported `high` for it.
@@ -869,7 +869,7 @@ const MATCH_GUARDS: Record<
     // — its *own* argument list is followed by the body's brace. Read off the
     // matching close paren, not a regex: `[^)]{0,120}\)\s*\{` found the next
     // `if (…) {` after an ordinary call and cleared it, which is how an
-    // AppVitrine edge function's `fetch(imageUrl)` went quiet.
+    // app B edge function's `fetch(imageUrl)` went quiet.
     if (
       args &&
       /^\s*(?::\s*[\w<>[\].|,? ]+\s*)?\{/.test(args.after) &&
@@ -884,7 +884,7 @@ const MATCH_GUARDS: Record<
     // this used `[^(),]{1,40},\s*[^(),]{1,40},` and a character class does not
     // stop at an object literal, so `fetch(url, { method, headers })` — the
     // commonest shape there is — read as three arguments and was cleared.
-    // SysXray's `fetch(url, { ...opts, signal: controller.signal })` is how
+    // app G's `fetch(url, { ...opts, signal: controller.signal })` is how
     // that turned up, on a `url` that is a bare parameter.
     if (args && args.arity >= 3) return false;
     if (!arg) return true;
@@ -982,7 +982,7 @@ const MATCH_GUARDS: Record<
   // its JSON-Schema branch looks for `"enum":` followed by a lowercase name.
   // `case "enum": return "≡";` is that, character for character — a switch over
   // a JSON-Schema type name, mapping it to an icon or a badge colour. Seven
-  // findings across BizDataly's query builder and type-colour table, every one
+  // findings across app C's query builder and type-colour table, every one
   // a switch label; the `case` keyword in front and the `return` behind it are
   // both visible from the match. A statement keyword can never be a schema's
   // enum values, and a `case` label is not an object property.
@@ -1018,7 +1018,7 @@ const MATCH_GUARDS: Record<
   // and returns **no rows at all**, only the count header. The rule's pattern
   // stops at the `'*'` and never reads the second argument, so a query that
   // returns zero columns was reported as "Exposes All Columns" — three of
-  // StorageVisual's eleven, all of them rate-limit counters in edge functions.
+  // app F's eleven, all of them rate-limit counters in edge functions.
   // Without `head: true` the rows do come back alongside the count, so that
   // stays reported; the other eight are real `select('*')` fetches and are
   // untouched.

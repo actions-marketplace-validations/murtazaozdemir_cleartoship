@@ -150,7 +150,7 @@ jobs:
           workingDirectory: site
           command: deploy
 
-      # A green push is not a deploy. Both aistoreaudit outages looked like a
+      # A green push is not a deploy. Both app A outages looked like a
       # passing job: once GitHub billing killed the run before it started, once
       # a missing token failed it in 8s, and both times production quietly served
       # a stale build for days. So this does not merely print the version — it

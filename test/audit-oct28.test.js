@@ -37,7 +37,7 @@ const PKG = JSON.stringify({ name: 'app', dependencies: { next: '16.2.2', react:
 test('a <style> element’s CSS text is not an HTML sink under VG408 either', async () => {
   // The 2026-10-13 audit taught VG012 that `<style dangerouslySetInnerHTML={{
   // __html: css }} />` is a stylesheet, not XSS. VG408 matched the same
-  // construct with no guard at all, so all eight of BizDataly's were reported
+  // construct with no guard at all, so all eight of app C's were reported
   // again under the other id — the guard did nothing while its twin ran.
   const root = project({
     'package.json': PKG,
@@ -109,7 +109,7 @@ test('a URL built on a literal origin is not a URL an attacker can point anywher
 
 test('a constant base reached through a ternary of two literals still fixes the origin', async () => {
   // `const base = sandbox ? A : B` then `` `${base}/v3/…` `` — three lines of
-  // one idiom, and six of BizDataly's QuickBooks callers. The first version of
+  // one idiom, and six of app C's QuickBooks callers. The first version of
   // this guard missed it twice: once for running out of hops, once because
   // both branches of the ternary contain the `:` of their own scheme.
   const root = project({
@@ -177,7 +177,7 @@ test('keep-case: a URL that arrives as a parameter is still reported', async () 
 });
 
 test('a URL through an SSRF validator is the fix, not the finding', async () => {
-  // datavot's `fetchNoOpenRedirect` does exactly what this rule's own `fix`
+  // app E's `fetchNoOpenRedirect` does exactly what this rule's own `fix`
   // text asks for — validate the host, `redirect: 'manual'`, bound the chain,
   // re-check every hop — and was reported high for it.
   const root = project({
@@ -214,7 +214,7 @@ test('a function that returns when there is no window fetches only in a browser'
 // --- a switch label read as a tool schema -----------------------------------
 
 test('`case "enum":` is a switch label, not an AI tool schema built from user input', async () => {
-  // Seven findings across BizDataly's query builder and type-colour table, all
+  // Seven findings across app C's query builder and type-colour table, all
   // of this shape: a switch over a JSON-Schema type name picking an icon.
   const root = project({
     'package.json': PKG,
@@ -464,7 +464,7 @@ test('keep-case: a later local of the same name does not vouch for an earlier fe
 test('keep-case: an `if (…) {` after a call does not make the call a definition', async () => {
   // The Workers-handler check asked whether a `) {` followed within 120
   // characters, which an ordinary `if (!response.ok) {` on the next line
-  // satisfies. An AppVitrine edge function's `fetch(imageUrl)` — on a value
+  // satisfies. An app B edge function's `fetch(imageUrl)` — on a value
   // straight out of `searchParams` — was cleared by it.
   const root = project({
     'package.json': PKG,
