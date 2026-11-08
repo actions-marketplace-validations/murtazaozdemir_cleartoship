@@ -583,6 +583,49 @@ overlap produced the phantom "+1 finding" from a file edited mid-scan.
 
 ## Open
 
+- **The whole `critical` tier, walked: 233 findings, 2 real (0.9%).** Reported 2026-11-08 by the
+  caller running the scanner over 42 projects, who decided every one with a written reason.
+  `VG010` 113, `CTS001` 27, `VG014` 24, `CTS030` 19, `VG414` 10, `VG011` 6, `VG001` 34. **The two
+  real findings were both `CTS030`** — a Supabase `service_role` key and a database password that
+  had been committed and pushed, which is exactly the finding a scanner should exist to produce.
+  So the instinct is right and the precision is not, and the one rule that earned its severity is
+  the one resting on a **verifiable external fact** (is this file tracked? was it ever committed?)
+  rather than on the shape of a line of code.
+
+  Four more rules, each with the same cause as the two already reported below:
+
+  - **`VG414` is labelled SSTI and is not finding SSTI.** Server-side template injection is when
+    input becomes the template *source*. All ten findings were Jinja2 `| safe` applied to a
+    *value* inside a static template file — which is an XSS question, a real one, but a different
+    one. Seven of the ten passed through a custom filter that escapes every text segment before
+    adding any markup; the rest were app-authored SVG constants, documentation strings, and a
+    stylesheet read off disk (CSS cannot be HTML-escaped and still work). Re-labelling this
+    would help more than re-tuning it.
+  - **`VG011` "Command injection risk" fires on list-form `subprocess.run([...])`**, which is the
+    *recommended* form — there is no shell to interpret anything. All six were literal argv,
+    constant paths, or object attributes. Worth requiring `shell=True`, a `os.system`, or a
+    string-form command before calling it command injection.
+  - **`VG014` "Dynamic code execution" cannot see a test harness.** 21 of 24 were the standard
+    way to unit-test a function with no module boundary: read the project's own source file and
+    `new Function` / `vm.runInContext` / `eval` it. One more was a HuggingFace
+    `from_pretrained()` weights load, which only executes code with `trust_remote_code=True`.
+  - **`CTS001`'s own title says "appears public by design"**, and 14 of its 27 were `/login`,
+    `/logout`, `/register`, `/forgot-password`, `/reset-password`, `/verify-email` — endpoints
+    that *cannot* require a session. Five were public contact forms. Of the four read
+    individually, one was a deprecated stub returning 410, one was gated by a one-time token
+    plus IP rate limiting, one by Cloudflare Turnstile that fails closed, and one by a license
+    key that is itself the credential. A rule that flags an auth endpoint for lacking auth needs
+    a path-aware exception before anything else.
+
+  **And one that is about this repo, not the rules: the scanner reports its own test corpus.**
+  Scanning `cleartoship` itself produced 13+ findings inside `test/fixtures/vulnerable-app/` and
+  `test/fixture-setup.js` — the deliberately insecure fixtures and fake secrets the suite needs
+  in order to prove the rules fire. Four `CTS001`, seven `CTS030`, one `VG014`, one `VG010`. Every
+  one is the scanner catching its own bait. A default exclusion for `test/fixtures/`, or a
+  shipped ignore file, would fix it for this repo and for any user who vendors fixtures the same
+  way — and it is the first thing a new user scanning a security tool's own repo would hit.
+
+
 - **Two critical rules, 147 findings, 0 true positives — the pattern, not just the rules.**
   Reported 2026-11-08 by the same caller running the scanner over 42 projects. `VG010` (113,
   reported below) and `VG001` "Hardcoded credentials" (34) were both worked through finding by
